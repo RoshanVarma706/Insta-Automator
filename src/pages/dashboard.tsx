@@ -8,6 +8,7 @@ import {
   Link2,
   Plus,
   TrendingUp,
+  Tv,
   Youtube,
 } from "lucide-react";
 import {
@@ -117,12 +118,14 @@ const CLIPS: ClipRow[] = [
 ];
 
 const sourceIcons: Record<Source, typeof Youtube> = {
+  twitch: Tv,
   youtube: Youtube,
   instagram: Instagram,
   generic: Link2,
 };
 
 const sourceTone: Record<Source, string> = {
+  twitch: "bg-insta-accent/10 text-insta-accent",
   youtube: "bg-insta-secondary/10 text-insta-secondary",
   instagram: "bg-insta-primary/10 text-insta-primary",
   generic: "bg-insta-accent/10 text-insta-accent",

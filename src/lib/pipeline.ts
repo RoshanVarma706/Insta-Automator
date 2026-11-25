@@ -1,12 +1,4 @@
-import {
-  PIPELINE_STEPS,
-  makeTitle,
-  runMockPipeline,
-  type MockResult,
-  type PipelineInput,
-} from "./mock";
-
-export type PipelineMode = "live" | "mock";
+import { PIPELINE_STEPS, type AspectMode, type Source } from "./mock";
 
 export type IgAccountInfo = {
   igUserId: string;
@@ -16,14 +8,36 @@ export type IgAccountInfo = {
 };
 
 export type PipelineStatus = {
-  mode: PipelineMode;
+  configured: boolean;
   igAccount: IgAccountInfo | null;
   error?: string;
 };
 
-export type PipelineResult = MockResult & {
-  mode: PipelineMode;
+export type ViralClipInput = {
+  url: string;
+  source: Source;
+  count: number;
+  targetDuration: number;
+  aspectMode: AspectMode;
+  onStep?: (index: number) => void;
+  isCancelled?: () => boolean;
+};
+
+export type GeneratedReel = {
+  id: string;
+  title: string;
+  startSeconds: number;
+  endSeconds: number;
+  durationSeconds: number;
+  hookReason: string;
+  caption: string;
+  hashtags: string[];
+  videoUrl: string;
+  mediaId?: string;
   containerId?: string;
+  format: string;
+  aspectMode: AspectMode;
+  createdAt: string;
 };
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
@@ -73,38 +87,25 @@ async function getJson<T>(url: string): Promise<T> {
   return data as T;
 }
 
-/**
- * Checks whether the serverless /api endpoints are live and resolves the
- * connected Instagram Business account via /api/ig-user.
- */
 export async function checkPipelineStatus(): Promise<PipelineStatus> {
   try {
-    const health = await getJson<{ ok: boolean; mode?: PipelineMode }>("/api/webhook");
-    if (health.mode !== "live") {
-      return { mode: "mock", igAccount: null };
-    }
+    const health = await getJson<{
+      ok: boolean;
+      configured?: boolean;
+      message?: string;
+    }>("/api/webhook");
 
-    try {
-      const ig = await getJson<IgAccountInfo & { ok: boolean }>("/api/ig-user");
-      return {
-        mode: "live",
-        igAccount: {
-          igUserId: ig.igUserId,
-          username: ig.username,
-          pageName: ig.pageName,
-          profilePictureUrl: ig.profilePictureUrl,
-        },
-      };
-    } catch (err) {
-      return {
-        mode: "live",
-        igAccount: null,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-  } catch {
-    // When running `vite` locally without Vercel functions, fall back to mock mode.
-    return { mode: "mock", igAccount: null };
+    return {
+      configured: Boolean(health.configured),
+      igAccount: null,
+      error: health.configured ? undefined : health.message,
+    };
+  } catch (err) {
+    return {
+      configured: false,
+      igAccount: null,
+      error: err instanceof Error ? err.message : "API server is unreachable.",
+    };
   }
 }
 
@@ -113,133 +114,113 @@ async function safeLogJob(payload: Record<string, unknown>): Promise<string | nu
     const res = await postJson<{ ok: boolean; id: string }>("/api/jobs", payload);
     return res.id;
   } catch {
-    // Job logging is best-effort so missing Supabase tables won't block publishing.
     return null;
   }
-}
-
-function formatDuration(seconds: number): string {
-  if (!seconds || seconds <= 0) return "0:30";
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+export function formatTimestamp(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
 /**
- * Runs the 5-step pipeline step-by-step against the real /api endpoints,
- * updating the UI at each stage. Falls back to `runMockPipeline` if the
- * backend is in mock mode.
+ * Runs the 3-step viral clipping pipeline (without Instagram publishing):
+ *  1. Upload source video (Twitch, YouTube, or direct URL) to Cloudinary
+ *  2. Gemini analyzes video & identifies `count` viral clips of `targetDuration`s
+ *  3. Cloudinary trims & reframes each clip to 1080×1920 (9:16)
  */
-export async function runRealPipeline(input: PipelineInput): Promise<PipelineResult> {
-  const { url, source, onStep, isCancelled } = input;
-
-  const status = await checkPipelineStatus();
-  if (status.mode === "mock") {
-    const mock = await runMockPipeline(input);
-    return { ...mock, mode: "mock" };
-  }
-
-  // Step 0: Detect source & create job record
+export async function runRealPipeline({
+  url,
+  source,
+  count,
+  targetDuration,
+  aspectMode,
+  onStep,
+  isCancelled,
+}: ViralClipInput): Promise<GeneratedReel[]> {
   if (isCancelled?.()) throw new Error("cancelled");
   onStep?.(0);
   const jobId = await safeLogJob({ action: "create", url, source });
 
   try {
-    // Step 1: Write caption & hashtags (Gemini)
+    // Step 0: Upload source video
+    if (jobId) await safeLogJob({ action: "update", id: jobId, status: "uploading" });
+    const uploaded = await postJson<{
+      publicId: string;
+      originalUrl: string;
+      analysisUrl?: string;
+      duration: number;
+      title?: string;
+    }>("/api/upload", { url });
+
+    // Step 1: Gemini viral clip identification
     if (isCancelled?.()) throw new Error("cancelled");
     onStep?.(1);
     if (jobId) await safeLogJob({ action: "update", id: jobId, status: "captioning" });
 
-    const captionRes = await postJson<{
-      caption: string;
-      hashtags: string[];
-    }>("/api/caption", { url, source });
-
-    // Step 2: Reframe to 9:16 (Cloudinary)
-    if (isCancelled?.()) throw new Error("cancelled");
-    onStep?.(2);
-    if (jobId) {
-      await safeLogJob({
-        action: "update",
-        id: jobId,
-        status: "uploading",
-        caption: captionRes.caption,
-        hashtags: captionRes.hashtags,
-      });
-    }
-
-    const uploadRes = await postJson<{
-      publicId: string;
-      reframedUrl: string;
-      format: string;
-      duration: number;
-    }>("/api/upload", { url });
-
-    // Step 3: Create Instagram media container
-    if (isCancelled?.()) throw new Error("cancelled");
-    onStep?.(3);
-    if (jobId) {
-      await safeLogJob({
-        action: "update",
-        id: jobId,
-        status: "publishing",
-        cloudinary_public_id: uploadRes.publicId,
-        cloudinary_url: uploadRes.reframedUrl,
-      });
-    }
-
-    const fullCaption = `${captionRes.caption}\n\n${captionRes.hashtags.join(" ")}`;
-    const publishRes = await postJson<{
-      status: "published" | "processing";
-      containerId: string;
-      mediaId?: string;
-    }>("/api/publish", {
-      videoUrl: uploadRes.reframedUrl,
-      caption: fullCaption,
+    const analysis = await postJson<{
+      clips: {
+        title: string;
+        startSeconds: number;
+        endSeconds: number;
+        hookReason: string;
+        caption: string;
+        hashtags: string[];
+      }[];
+    }>("/api/caption", {
+      url,
+      source,
+      count,
+      targetDuration,
+      totalDuration: uploaded.duration,
+      videoTitle: uploaded.title,
+      analysisUrl: uploaded.analysisUrl,
     });
 
-    // Step 4: Poll (if still processing) & Publish to Reels
+    // Step 2: Clip & 9:16 reframe each segment in Cloudinary
     if (isCancelled?.()) throw new Error("cancelled");
-    onStep?.(4);
+    onStep?.(2);
 
-    let mediaId = publishRes.mediaId ?? "";
+    const renderedReels: GeneratedReel[] = [];
 
-    if (publishRes.status === "processing") {
-      if (jobId) {
-        await safeLogJob({
-          action: "update",
-          id: jobId,
-          status: "polling",
-          ig_container_id: publishRes.containerId,
-        });
-      }
+    for (let i = 0; i < analysis.clips.length; i++) {
+      if (isCancelled?.()) throw new Error("cancelled");
+      const clip = analysis.clips[i];
 
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (isCancelled?.()) throw new Error("cancelled");
-        await sleep(3000);
+      const rendered = await postJson<{
+        publicId: string;
+        clipUrl: string;
+        format: string;
+        aspectMode: AspectMode;
+        startSeconds: number;
+        endSeconds: number;
+        durationSeconds: number;
+      }>("/api/upload", {
+        publicId: uploaded.publicId,
+        startSeconds: clip.startSeconds,
+        endSeconds: clip.endSeconds,
+        aspectMode,
+      });
 
-        const poll = await getJson<{
-          status: "processing" | "published" | "error";
-          mediaId?: string;
-          error?: string;
-        }>(`/api/publish-status?id=${encodeURIComponent(publishRes.containerId)}`);
-
-        if (poll.status === "error") {
-          throw new Error(poll.error || "Instagram container processing failed.");
-        }
-        if (poll.status === "published" && poll.mediaId) {
-          mediaId = poll.mediaId;
-          break;
-        }
-      }
-    }
-
-    if (!mediaId) {
-      throw new Error("Timed out waiting for Instagram to finish processing the Reel.");
+      renderedReels.push({
+        id: `${uploaded.publicId}_clip_${i + 1}`,
+        title: clip.title,
+        startSeconds: rendered.startSeconds,
+        endSeconds: rendered.endSeconds,
+        durationSeconds: rendered.durationSeconds,
+        hookReason: clip.hookReason,
+        caption: clip.caption,
+        hashtags: clip.hashtags,
+        videoUrl: rendered.clipUrl,
+        format: rendered.format || "1080×1920",
+        aspectMode: rendered.aspectMode || aspectMode,
+        createdAt: new Date().toISOString(),
+      });
     }
 
     if (jobId) {
@@ -247,25 +228,14 @@ export async function runRealPipeline(input: PipelineInput): Promise<PipelineRes
         action: "update",
         id: jobId,
         status: "published",
-        ig_container_id: publishRes.containerId,
-        ig_media_id: mediaId,
+        caption: renderedReels[0]?.caption,
+        hashtags: renderedReels[0]?.hashtags,
+        cloudinary_public_id: uploaded.publicId,
+        cloudinary_url: renderedReels[0]?.videoUrl,
       });
     }
 
-    return {
-      id: uploadRes.publicId,
-      source,
-      title: makeTitle(source, url),
-      caption: captionRes.caption,
-      hashtags: captionRes.hashtags,
-      videoUrl: uploadRes.reframedUrl,
-      mediaId,
-      duration: formatDuration(uploadRes.duration),
-      size: uploadRes.format || "1080 × 1920",
-      createdAt: new Date().toISOString(),
-      mode: "live",
-      containerId: publishRes.containerId,
-    };
+    return renderedReels;
   } catch (err) {
     if (jobId && !(err instanceof Error && err.message === "cancelled")) {
       await safeLogJob({
@@ -277,6 +247,51 @@ export async function runRealPipeline(input: PipelineInput): Promise<PipelineRes
     }
     throw err;
   }
+}
+
+/**
+ * Optional: publish an already-clipped 9:16 Reel to Instagram via Meta Graph API.
+ */
+export async function publishClipToInstagram(
+  reel: GeneratedReel,
+): Promise<{ mediaId: string; containerId: string }> {
+  const fullCaption = `${reel.caption}\n\n${reel.hashtags.join(" ")}`;
+  const publishRes = await postJson<{
+    status: "published" | "processing";
+    containerId: string;
+    mediaId?: string;
+  }>("/api/publish", {
+    videoUrl: reel.videoUrl,
+    caption: fullCaption,
+  });
+
+  if (publishRes.status === "published" && publishRes.mediaId) {
+    return {
+      mediaId: publishRes.mediaId,
+      containerId: publishRes.containerId,
+    };
+  }
+
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    await sleep(3000);
+    const poll = await getJson<{
+      status: "processing" | "published" | "error";
+      mediaId?: string;
+      error?: string;
+    }>(`/api/publish-status?id=${encodeURIComponent(publishRes.containerId)}`);
+
+    if (poll.status === "error") {
+      throw new Error(poll.error || "Instagram container processing failed.");
+    }
+    if (poll.status === "published" && poll.mediaId) {
+      return {
+        mediaId: poll.mediaId,
+        containerId: publishRes.containerId,
+      };
+    }
+  }
+
+  throw new Error("Timed out waiting for Instagram to finish processing the Reel.");
 }
 
 export { PIPELINE_STEPS };

@@ -1,21 +1,27 @@
 /**
- * Vercel serverless function — full pipeline webhook.
+ * Vercel serverless function — full live pipeline webhook.
  *
- * POST /api/webhook  { "url": "…", "source": "youtube"|"instagram"|"generic" }
+ * POST /api/webhook
+ *   { "url": "…", "source": "youtube"|"instagram"|"generic",
+ *     "count"?: 1..5, "targetDuration"?: 30|45|60 }
  *
- * Runs the complete pipeline in a single request:
- *   1. Generate caption + hashtags  (Gemini)
- *   2. Upload + 9:16 reframe        (Cloudinary)
- *   3. Create container + publish    (Meta Graph API)
+ * Runs the real multi-clip pipeline:
+ *   1. Upload source video to Cloudinary
+ *   2. Identify viral clips + strong start/end points via Gemini
+ *   3. Clip & 9:16 reframe each segment in Cloudinary
+ *   4. Create Instagram Reels container & publish via Meta Graph API
  *
- * Also works as a health check:
- * GET /api/webhook → { ok, mode: "live"|"mock", steps }
+ * GET /api/webhook -> health check
  */
 
 import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail } from "./_lib/types";
-import { generateCaption } from "./_lib/gemini";
-import { uploadAndReframe } from "./_lib/cloudinary";
+import { parseBody, fail, errorMessage } from "./_lib/types";
+import { analyzeViralClips } from "./_lib/gemini";
+import {
+  uploadSourceVideo,
+  renderClippedReel,
+  type AspectMode,
+} from "./_lib/cloudinary";
 import {
   getIgUserId,
   createReelContainer,
@@ -26,11 +32,9 @@ import {
 type Source = "youtube" | "instagram" | "generic";
 
 const STEPS = [
-  "Detect source & fetch video",
-  "Write caption & hashtags",
-  "Reframe to 9:16",
-  "Create Instagram media",
-  "Publish to Reels",
+  "Fetch & upload source video",
+  "Gemini viral clip detection",
+  "Clip & reframe to 9:16",
 ];
 
 function isSource(value: unknown): value is Source {
@@ -44,21 +48,21 @@ function sleep(ms: number) {
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader("Cache-Control", "no-store");
 
-  // ── Health check ───────────────────────────────────────────────
-  if (req.method === "GET") {
-    const hasKeys = !!(
-      process.env.GEMINI_API_KEY &&
-      process.env.CLOUDINARY_URL &&
-      process.env.INSTAGRAM_ACCESS_TOKEN
-    );
+  const hasClippingKeys = !!(
+    process.env.GEMINI_API_KEY && process.env.CLOUDINARY_URL
+  );
+  const hasIgKey = !!process.env.INSTAGRAM_ACCESS_TOKEN;
 
+  if (req.method === "GET") {
     res.status(200).json({
       ok: true,
-      mode: hasKeys ? "live" : "mock",
+      mode: "live",
+      configured: hasClippingKeys,
+      igConfigured: hasIgKey,
       steps: STEPS,
-      message: hasKeys
-        ? "Pipeline is live. POST a url to start."
-        : "Running in mock mode — add API keys to go live.",
+      message: hasClippingKeys
+        ? "Clipping pipeline is ready. POST a url to start."
+        : "Missing required API keys (GEMINI_API_KEY, CLOUDINARY_URL).",
     });
     return;
   }
@@ -68,10 +72,26 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return fail(res, 405, "Method not allowed");
   }
 
-  // ── Parse input ────────────────────────────────────────────────
+  if (!hasClippingKeys) {
+    return fail(
+      res,
+      500,
+      "Missing server API keys (GEMINI_API_KEY, CLOUDINARY_URL).",
+    );
+  }
+
   const body = parseBody(req.body ?? req.query);
   const url = typeof body.url === "string" ? body.url.trim() : "";
   const source: Source = isSource(body.source) ? body.source : "generic";
+  const count = Math.min(5, Math.max(1, Math.round(Number(body.count) || 1)));
+  const targetDuration = Math.min(
+    90,
+    Math.max(15, Math.round(Number(body.targetDuration) || 30)),
+  );
+  const aspectMode: AspectMode =
+    body.aspectMode === "16:9" || body.aspectMode === "9:16-16:9"
+      ? body.aspectMode
+      : "9:16";
 
   if (!url) return fail(res, 400, "A `url` field is required.");
 
@@ -84,72 +104,64 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return fail(res, 400, "`url` must be a valid http(s) link.");
   }
 
-  // ── Check if real keys are present ─────────────────────────────
-  const hasKeys = !!(
-    process.env.GEMINI_API_KEY &&
-    process.env.CLOUDINARY_URL &&
-    process.env.INSTAGRAM_ACCESS_TOKEN
-  );
-
-  if (!hasKeys) {
-    // Fall back to the original mock response.
-    const now = Date.now();
-    res.status(200).json({
-      ok: true,
-      mode: "mock",
-      source,
-      url,
-      steps: STEPS,
-      result: {
-        id: `clip_${now.toString(36)}`,
-        caption: "Mock caption — replace this with the Gemini response.",
-        hashtags: ["#reels", "#viral", "#fyp", "#trending", "#instagood"],
-        cloudinaryUrl: `https://res.cloudinary.com/demo/video/upload/c_fill,w_1080,h_1920/sample_${now}.mp4`,
-        mediaId: `ig_${Math.floor(now / 1000)}`,
-        format: "1080x1920",
-      },
-    });
-    return;
-  }
-
-  // ── Real pipeline ──────────────────────────────────────────────
-
   try {
-    // Step 1 — Caption & hashtags
-    const caption = await generateCaption(url, source);
+    const uploaded = await uploadSourceVideo(url);
+    const viralClips = await analyzeViralClips({
+      videoUrl: url,
+      source,
+      count,
+      targetDuration,
+      totalDuration: uploaded.duration,
+    });
 
-    // Step 2 — Cloudinary upload + 9:16 reframe
-    const upload = await uploadAndReframe(url);
-
-    // Step 3 — Create Instagram Reels container
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN!;
     const { igUserId } = await getIgUserId(accessToken);
-    const fullCaption = `${caption.caption}\n\n${caption.hashtags.join(" ")}`;
-    const containerId = await createReelContainer(
-      igUserId,
-      upload.reframedUrl,
-      fullCaption,
-      accessToken,
-    );
 
-    // Step 4 — Poll for readiness + publish
-    let mediaId = "";
-    let publishStatus = "processing";
+    const results = [];
+    for (const clip of viralClips) {
+      const rendered = await renderClippedReel(
+        uploaded.publicId,
+        clip.startSeconds,
+        clip.endSeconds,
+        aspectMode,
+      );
+      const fullCaption = `${clip.caption}\n\n${clip.hashtags.join(" ")}`;
+      const containerId = await createReelContainer(
+        igUserId,
+        rendered.clipUrl,
+        fullCaption,
+        accessToken,
+      );
 
-    for (let i = 0; i < 15; i++) {
-      await sleep(2000);
-      const check = await checkContainerStatus(containerId, accessToken);
-
-      if (check.statusCode === "ERROR") {
-        throw new Error(
-          check.errorMessage || "Container processing failed.",
-        );
+      let mediaId = "";
+      let publishStatus = "processing";
+      for (let i = 0; i < 15; i++) {
+        await sleep(2000);
+        const check = await checkContainerStatus(containerId, accessToken);
+        if (check.statusCode === "ERROR") {
+          throw new Error(check.errorMessage || "Container processing failed.");
+        }
+        if (check.statusCode === "FINISHED") {
+          mediaId = await publishReel(igUserId, containerId, accessToken);
+          publishStatus = "published";
+          break;
+        }
       }
-      if (check.statusCode === "FINISHED") {
-        mediaId = await publishReel(igUserId, containerId, accessToken);
-        publishStatus = "published";
-        break;
-      }
+
+      results.push({
+        title: clip.title,
+        startSeconds: rendered.startSeconds,
+        endSeconds: rendered.endSeconds,
+        durationSeconds: rendered.durationSeconds,
+        hookReason: clip.hookReason,
+        caption: clip.caption,
+        hashtags: clip.hashtags,
+        cloudinaryUrl: rendered.clipUrl,
+        containerId,
+        mediaId: mediaId || null,
+        status: publishStatus,
+        format: rendered.format,
+      });
     }
 
     res.status(200).json({
@@ -158,20 +170,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       source,
       url,
       steps: STEPS,
-      status: publishStatus,
-      result: {
-        id: upload.publicId,
-        caption: caption.caption,
-        hashtags: caption.hashtags,
-        cloudinaryUrl: upload.reframedUrl,
-        containerId,
-        mediaId: mediaId || null,
-        format: upload.format,
-        duration: upload.duration,
-      },
+      results,
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return fail(res, 500, message);
+    return fail(res, 500, errorMessage(err));
   }
 }

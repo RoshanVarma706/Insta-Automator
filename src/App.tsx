@@ -26,7 +26,7 @@ export default function App() {
 
         <footer className="relative z-10 border-t border-insta-border/70 bg-white/50 backdrop-blur">
           <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-insta-muted sm:flex-row">
-            <p>Insta Auto — mock mode runs entirely in your browser.</p>
+            <p>Insta Auto — AI Viral Clipping &amp; Reels Publishing.</p>
             <p>Built for Vercel · Gemini · Cloudinary · Meta Graph API</p>
           </div>
         </footer>

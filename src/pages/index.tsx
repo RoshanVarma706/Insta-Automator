@@ -3,13 +3,17 @@ import { Link } from "react-router-dom";
 import {
   ArrowRight,
   Check,
+  Clock,
   Copy,
+  Download,
+  Film,
   Instagram,
   Link2,
   Loader2,
-  Play,
   RotateCcw,
+  Send,
   Sparkles,
+  Tv,
   Youtube,
 } from "lucide-react";
 import {
@@ -25,16 +29,20 @@ import {
   useToast,
 } from "@/components/ui";
 import {
+  ASPECT_OPTIONS,
   PIPELINE_STEPS,
   SOURCE_OPTIONS,
   hostnameOf,
   isValidVideoUrl,
+  type AspectMode,
   type Source,
 } from "@/lib/mock";
 import {
   checkPipelineStatus,
+  formatTimestamp,
+  publishClipToInstagram,
   runRealPipeline,
-  type PipelineResult,
+  type GeneratedReel,
   type PipelineStatus,
 } from "@/lib/pipeline";
 import { cn } from "@/lib/utils";
@@ -42,19 +50,31 @@ import { cn } from "@/lib/utils";
 type RunStatus = "idle" | "running" | "done" | "error";
 
 const sourceIcons: Record<Source, typeof Youtube> = {
+  twitch: Tv,
   youtube: Youtube,
   instagram: Instagram,
   generic: Link2,
 };
 
+const COUNT_OPTIONS = [1, 2, 3, 4, 5] as const;
+const DURATION_OPTIONS = [
+  { value: 30, label: "30 sec", hint: "Snappy hook" },
+  { value: 45, label: "45 sec", hint: "Balanced story" },
+  { value: 60, label: "60 sec", hint: "Deep highlight" },
+] as const;
+
 export default function Home() {
   const [url, setUrl] = useState("");
-  const [source, setSource] = useState<Source>("youtube");
+  const [source, setSource] = useState<Source>("twitch");
+  const [clipCount, setClipCount] = useState<number>(1);
+  const [targetDuration, setTargetDuration] = useState<number>(30);
+  const [aspectMode, setAspectMode] = useState<AspectMode>("9:16-16:9");
   const [status, setStatus] = useState<RunStatus>("idle");
   const [activeStep, setActiveStep] = useState(-1);
-  const [result, setResult] = useState<PipelineResult | null>(null);
+  const [results, setResults] = useState<GeneratedReel[]>([]);
+  const [publishingId, setPublishingId] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
-    mode: "mock",
+    configured: true,
     igAccount: null,
   });
   const [error, setError] = useState("");
@@ -91,7 +111,7 @@ export default function Home() {
 
     cancelled.current = false;
     setError("");
-    setResult(null);
+    setResults([]);
     setStatus("running");
     setActiveStep(0);
 
@@ -99,6 +119,9 @@ export default function Home() {
       const output = await runRealPipeline({
         url,
         source,
+        count: clipCount,
+        targetDuration,
+        aspectMode,
         onStep: (index) => {
           if (!cancelled.current) setActiveStep(index);
         },
@@ -107,15 +130,12 @@ export default function Home() {
 
       if (cancelled.current) return;
 
-      setResult(output);
+      setResults(output);
       setStatus("done");
       setActiveStep(PIPELINE_STEPS.length - 1);
       toast({
-        title: output.mode === "live" ? "Reel published!" : "Reel is ready",
-        description:
-          output.mode === "live"
-            ? "Caption generated, 9:16 rendered, and published to Instagram Reels."
-            : "Mock pipeline finished — caption, 9:16 render and publish simulated.",
+        title: `${output.length} viral clip${output.length === 1 ? "" : "s"} ready!`,
+        description: "9:16 vertical clips rendered with captions & hashtags.",
         variant: "success",
       });
     } catch (err) {
@@ -129,11 +149,38 @@ export default function Home() {
     }
   }
 
+  async function handlePublish(reel: GeneratedReel) {
+    setPublishingId(reel.id);
+    try {
+      const published = await publishClipToInstagram(reel);
+      setResults((prev) =>
+        prev.map((item) =>
+          item.id === reel.id
+            ? { ...item, mediaId: published.mediaId, containerId: published.containerId }
+            : item,
+        ),
+      );
+      toast({
+        title: "Published to Instagram Reels!",
+        description: `Media ID: ${published.mediaId}`,
+        variant: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Instagram publish failed",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setPublishingId(null);
+    }
+  }
+
   function reset() {
     cancelled.current = false;
     setStatus("idle");
     setActiveStep(-1);
-    setResult(null);
+    setResults([]);
     setError("");
     setUrl("");
     setTouched(false);
@@ -157,17 +204,18 @@ export default function Home() {
       <section className="animate-float-in text-center sm:text-left">
         <span className="inline-flex items-center gap-2 rounded-full border border-insta-border bg-white/70 px-3 py-1.5 text-xs font-semibold text-insta-muted">
           <Sparkles className="h-3.5 w-3.5 text-insta-primary" />
-          Gemini + Cloudinary + Meta Graph API
+          Twitch · YouTube · Gemini Viral Clipping · Cloudinary 9:16
         </span>
 
         <h1 className="mt-4 text-3xl font-extrabold tracking-tight sm:text-4xl lg:text-5xl">
-          Turn any link into a{" "}
-          <span className="gradient-text">vertical Reel</span>
+          Turn any link into{" "}
+          <span className="gradient-text">viral 9:16 clips</span>
         </h1>
 
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-insta-muted sm:text-base">
-          Paste a video URL. Insta Auto writes the caption, reframes the footage to 9:16 and
-          publishes it to Instagram — all tracked in one dashboard.
+          Paste a Twitch, YouTube, or video URL. Choose how many clips and the target duration —
+          Gemini identifies the most viral moments with strong hooks and clean endings, then
+          renders 1080×1920 vertical clips ready to download or publish.
         </p>
       </section>
 
@@ -175,13 +223,11 @@ export default function Home() {
         <Card className="animate-float-in overflow-hidden">
           <div className="gradient-rule" />
           <CardHeader>
-            <CardTitle>New Instagram Reel</CardTitle>
+            <CardTitle>Generate Reel</CardTitle>
             <CardDescription>
-              {pipelineStatus.mode === "live"
-                ? pipelineStatus.igAccount
-                  ? `Connected to @${pipelineStatus.igAccount.username} (${pipelineStatus.igAccount.pageName}). Ready to publish.`
-                  : "Live pipeline active — Gemini, Cloudinary & Meta Graph API."
-                : "Mock mode is on — deploy to Vercel with API keys or run `vercel dev` to go live."}
+              {pipelineStatus.configured
+                ? "Live clipping pipeline active — Twitch, YouTube & direct video links."
+                : pipelineStatus.error || "Configure GEMINI_API_KEY and CLOUDINARY_URL to run."}
             </CardDescription>
           </CardHeader>
 
@@ -204,7 +250,7 @@ export default function Home() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && status !== "running") handleGenerate();
                 }}
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder="https://www.twitch.tv/videos/... or youtube.com/watch?v=..."
                 disabled={status === "running"}
                 autoComplete="off"
                 spellCheck={false}
@@ -215,7 +261,7 @@ export default function Home() {
               <p id="video-url-help" className="mt-1.5 text-xs text-insta-muted">
                 {url && urlIsValid
                   ? `Detected host: ${hostnameOf(url)}`
-                  : "YouTube, Instagram or any direct video link."}
+                  : "Twitch VODs/Clips, YouTube, Instagram or any direct video link."}
               </p>
             </div>
 
@@ -223,7 +269,7 @@ export default function Home() {
               <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-insta-muted">
                 Source type
               </p>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                 {SOURCE_OPTIONS.map((option) => {
                   const Icon = sourceIcons[option.id];
                   const selected = source === option.id;
@@ -262,6 +308,124 @@ export default function Home() {
               </div>
             </div>
 
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-insta-muted">
+                  <Film className="h-3.5 w-3.5 text-insta-primary" />
+                  How many Reels / Shorts
+                </p>
+                <div className="grid grid-cols-5 gap-1.5">
+                  {COUNT_OPTIONS.map((num) => {
+                    const selected = clipCount === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setClipCount(num)}
+                        disabled={status === "running"}
+                        aria-pressed={selected}
+                        className={cn(
+                          "h-11 rounded-xl border text-sm font-bold transition disabled:opacity-60",
+                          selected
+                            ? "border-insta-primary/50 bg-insta-primary/10 text-insta-primary ring-1 ring-insta-primary/20"
+                            : "border-insta-border bg-white text-insta-text hover:border-insta-primary/30",
+                        )}
+                      >
+                        {num}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1.5 text-xs text-insta-muted">
+                  Gemini picks the top {clipCount} viral moment{clipCount === 1 ? "" : "s"}.
+                </p>
+              </div>
+
+              <div>
+                <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-insta-muted">
+                  <Clock className="h-3.5 w-3.5 text-insta-primary" />
+                  Clip duration
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {DURATION_OPTIONS.map((opt) => {
+                    const selected = targetDuration === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setTargetDuration(opt.value)}
+                        disabled={status === "running"}
+                        aria-pressed={selected}
+                        className={cn(
+                          "flex flex-col items-center justify-center rounded-xl border py-2 text-center transition disabled:opacity-60",
+                          selected
+                            ? "border-insta-primary/50 bg-insta-primary/10 text-insta-primary ring-1 ring-insta-primary/20"
+                            : "border-insta-border bg-white text-insta-text hover:border-insta-primary/30",
+                        )}
+                      >
+                        <span className="text-sm font-bold">{opt.label}</span>
+                        <span className="text-[10px] text-insta-muted">{opt.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1.5 text-xs text-insta-muted">
+                  {targetDuration >= 60
+                    ? "Strong opening hook & finishes within 60s max."
+                    : `Targets ${targetDuration}s, extends slightly for a clean ending.`}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-insta-muted">
+                Video layout &amp; aspect ratio
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {ASPECT_OPTIONS.map((opt) => {
+                  const selected = aspectMode === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setAspectMode(opt.id)}
+                      disabled={status === "running"}
+                      aria-pressed={selected}
+                      className={cn(
+                        "flex items-center gap-3 rounded-xl border p-3 text-left transition disabled:opacity-60",
+                        selected
+                          ? "border-insta-primary/50 bg-insta-primary/5 ring-1 ring-insta-primary/20"
+                          : "border-insta-border bg-white hover:border-insta-primary/30",
+                      )}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-insta-bg"
+                      >
+                        {opt.id === "9:16" ? (
+                          <span className="h-6 w-3.5 rounded-[3px] border-2 border-current text-insta-primary" />
+                        ) : opt.id === "16:9" ? (
+                          <span className="h-3.5 w-6 rounded-[3px] border-2 border-current text-insta-primary" />
+                        ) : (
+                          <span className="flex h-6 w-3.5 items-center justify-center rounded-[3px] border border-insta-primary/60 bg-insta-primary/15">
+                            <span className="h-2 w-3 rounded-[1px] bg-insta-primary" />
+                          </span>
+                        )}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-insta-text">
+                          {opt.label}
+                        </span>
+                        <span className="block text-xs leading-snug text-insta-muted">
+                          {opt.hint}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="flex flex-col gap-3 sm:flex-row">
               <Button
                 onClick={handleGenerate}
@@ -271,12 +435,12 @@ export default function Home() {
                 {status === "running" ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Running pipeline…
+                    Clipping &amp; reframing…
                   </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4" />
-                    Generate Reel
+                    Generate {clipCount} Clip{clipCount === 1 ? "" : "s"} ({targetDuration}s)
                   </>
                 )}
               </Button>
@@ -290,14 +454,14 @@ export default function Home() {
             </div>
 
             {error ? (
-              <Alert variant="destructive" title="Check the link">
+              <Alert variant="destructive" title="Pipeline error">
                 {error}
               </Alert>
             ) : null}
 
             {status !== "idle" ? (
               <div className="space-y-4 rounded-2xl border border-insta-border bg-insta-bg/50 p-4">
-                <Progress value={progress} label="Pipeline progress" />
+                <Progress value={progress} label="Clipping progress" />
 
                 <ol className="space-y-3">
                   {PIPELINE_STEPS.map((step, index) => {
@@ -347,102 +511,133 @@ export default function Home() {
         </Card>
 
         <div className="space-y-6">
-          {result ? (
-            <Card className="animate-float-in overflow-hidden">
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between gap-3">
-                  <CardTitle className="text-base">Ready to publish</CardTitle>
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-insta-success/10 px-2.5 py-1 text-xs font-semibold text-insta-success">
-                    <Check className="h-3.5 w-3.5" />
-                    Published
-                  </span>
-                </div>
-                <CardDescription>{result.title}</CardDescription>
-              </CardHeader>
+          {results.length > 0 ? (
+            results.map((reel, idx) => (
+              <Card key={reel.id} className="animate-float-in overflow-hidden">
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <CardTitle className="text-base">
+                      Clip #{idx + 1} · {reel.title}
+                    </CardTitle>
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-insta-success/10 px-2.5 py-1 text-xs font-semibold text-insta-success">
+                      <Check className="h-3.5 w-3.5" />
+                      {reel.mediaId ? "Published" : "Clip ready"}
+                    </span>
+                  </div>
+                  <CardDescription>
+                    {formatTimestamp(reel.startSeconds)} – {formatTimestamp(reel.endSeconds)} (
+                    {reel.durationSeconds}s) · {reel.format}
+                  </CardDescription>
+                </CardHeader>
 
-              <CardContent className="space-y-4">
-                <div className="relative overflow-hidden rounded-xl bg-[linear-gradient(160deg,#e1306c,#fd1f1f_55%,#a855f7)]">
-                  {result.mode === "live" && result.videoUrl ? (
+                <CardContent className="space-y-4">
+                  <div className="relative overflow-hidden rounded-xl bg-black">
                     <video
-                      src={result.videoUrl}
+                      src={reel.videoUrl}
                       controls
                       playsInline
-                      className="aspect-[9/16] max-h-72 w-full bg-black object-contain"
+                      className={cn(
+                        "w-full object-contain",
+                        reel.aspectMode === "16:9" ? "aspect-video max-h-56" : "aspect-[9/16] max-h-72",
+                      )}
                     />
-                  ) : (
-                    <div className="flex aspect-[9/16] max-h-64 w-full items-center justify-center">
-                      <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white/25 text-white backdrop-blur">
-                        <Play className="ml-0.5 h-5 w-5 fill-current" />
-                      </span>
-                    </div>
-                  )}
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/50 to-transparent p-3 text-[11px] font-medium text-white">
-                    {result.size} · {result.duration} ·{" "}
-                    {result.mode === "live" ? "9:16 Cloudinary render" : "mock render"}
                   </div>
-                </div>
 
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-insta-muted">
-                      Caption
+                  <div className="rounded-lg border border-insta-primary/20 bg-insta-primary/5 p-3 text-xs leading-relaxed text-insta-text">
+                    <span className="font-semibold text-insta-primary">Viral hook: </span>
+                    {reel.hookReason}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-insta-muted">
+                        Caption
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => copy(reel.caption, "Caption")}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-insta-primary hover:underline"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy
+                      </button>
+                    </div>
+                    <p className="rounded-lg bg-insta-bg p-3 text-sm leading-relaxed text-insta-text">
+                      {reel.caption}
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => copy(result.caption, "Caption")}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-insta-primary hover:underline"
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-insta-muted">
+                      Hashtags
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {reel.hashtags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full bg-insta-accent/10 px-2.5 py-1 text-xs font-semibold text-insta-accent"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <a
+                      href={reel.videoUrl}
+                      download={`${reel.title.replace(/[^a-z0-9]+/gi, "_")}.mp4`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-insta-border bg-white px-4 text-xs font-semibold text-insta-text transition hover:bg-insta-bg"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download {reel.aspectMode === "16:9" ? "16:9" : "9:16"} MP4
+                    </a>
+
+                    <Button
+                      variant="secondary"
+                      className="h-10 text-xs"
+                      onClick={() => copy(`${reel.caption}\n\n${reel.hashtags.join(" ")}`, "Post")}
                     >
                       <Copy className="h-3.5 w-3.5" />
-                      Copy
-                    </button>
+                      Copy post text
+                    </Button>
                   </div>
-                  <p className="rounded-lg bg-insta-bg p-3 text-sm leading-relaxed text-insta-text">
-                    {result.caption}
-                  </p>
-                </div>
 
-                <div className="space-y-1.5">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-insta-muted">
-                    Hashtags
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {result.hashtags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="rounded-full bg-insta-accent/10 px-2.5 py-1 text-xs font-semibold text-insta-accent"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid gap-2 text-xs text-insta-muted">
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-insta-border px-3 py-2">
-                    <span>Media ID</span>
-                    <span className="truncate font-mono text-insta-text">{result.mediaId}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-insta-border px-3 py-2">
-                    <span>Cloudinary asset</span>
-                    <span className="truncate font-mono text-insta-text">{result.id}</span>
-                  </div>
-                </div>
-
-                <Button
-                  variant="secondary"
-                  className="w-full"
-                  onClick={() => copy(`${result.caption}\n\n${result.hashtags.join(" ")}`, "Post")}
-                >
-                  <Copy className="h-4 w-4" />
-                  Copy caption + hashtags
-                </Button>
-              </CardContent>
-            </Card>
+                  {reel.mediaId ? (
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-insta-success/30 bg-insta-success/5 px-3 py-2 text-xs">
+                      <span className="font-semibold text-insta-success">Instagram Media ID</span>
+                      <span className="truncate font-mono text-insta-text">{reel.mediaId}</span>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      className="w-full"
+                      disabled={publishingId === reel.id}
+                      onClick={() => handlePublish(reel)}
+                    >
+                      {publishingId === reel.id ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Publishing to Instagram…
+                        </>
+                      ) : (
+                        <>
+                          <Send className="h-4 w-4" />
+                          Publish to Instagram Reels
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            ))
           ) : (
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">What happens next</CardTitle>
-                <CardDescription>Five automated steps, one click.</CardDescription>
+                <CardDescription>Three automated clipping steps, one click.</CardDescription>
               </CardHeader>
               <CardContent>
                 <ol className="space-y-3">

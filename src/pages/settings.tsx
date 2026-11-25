@@ -86,7 +86,7 @@ const integrations: { name: string; role: string; icon: LucideIcon; tone: string
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsState>(loadSettings);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
-    mode: "mock",
+    configured: false,
     igAccount: null,
   });
   const { toast } = useToast();
@@ -137,7 +137,7 @@ export default function Settings() {
         </p>
       </div>
 
-      {pipelineStatus.mode === "live" ? (
+      {pipelineStatus.configured ? (
         <Alert variant="success" title="Live pipeline connected">
           {pipelineStatus.igAccount ? (
             <>
@@ -158,10 +158,9 @@ export default function Settings() {
           )}
         </Alert>
       ) : (
-        <Alert variant="default" title="You are in mock mode">
-          No external API is called. The create page simulates Gemini, Cloudinary and Meta
-          responses so you can test the full flow. Add server-side keys in Vercel to switch to the
-          real pipeline — see <code className="rounded bg-white/70 px-1">.env.example</code>.
+        <Alert variant="warning" title="API keys required">
+          {pipelineStatus.error ||
+            "Add GEMINI_API_KEY, CLOUDINARY_URL, and INSTAGRAM_ACCESS_TOKEN in .env or Vercel Environment Variables."}
         </Alert>
       )}
 
@@ -267,11 +266,11 @@ export default function Settings() {
                 </span>
                 <div className="flex h-11 items-center gap-2 rounded-xl border border-insta-border bg-insta-bg/60 px-3.5 text-sm font-semibold text-insta-text">
                   <ShieldCheck className="h-4 w-4 text-insta-success" />
-                  {pipelineStatus.mode === "live"
+                  {pipelineStatus.configured
                     ? pipelineStatus.igAccount
                       ? `Live (@${pipelineStatus.igAccount.username})`
                       : "Live (API keys active)"
-                    : "Mock (no keys required)"}
+                    : "Not configured"}
                 </div>
               </div>
             </div>

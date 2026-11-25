@@ -1,16 +1,27 @@
 /**
  * POST /api/upload
  *
- * Uploads a video from a public URL to Cloudinary and eagerly
- * renders a 1080×1920 (9:16) vertical version for Instagram Reels.
+ * Two modes:
+ *  1. Source upload: { "url": "https://…" }
+ *     Uploads the source video (YouTube or direct MP4) to Cloudinary and
+ *     returns { publicId, originalUrl, duration, bytes }.
  *
- * Request:  { "url": "https://…/video.mp4" }
- * Response: { "ok": true, "publicId": "…", "reframedUrl": "…", … }
+ *  2. Clip & 9:16 render: { "publicId": "…", "startSeconds": 12, "endSeconds": 42 }
+ *     Clips the exact viral segment and reframes it to 1080×1920 MP4.
  */
 
 import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail } from "./_lib/types";
-import { uploadAndReframe } from "./_lib/cloudinary";
+import { parseBody, fail, errorMessage } from "./_lib/types";
+import {
+  uploadSourceVideo,
+  renderClippedReel,
+  type AspectMode,
+} from "./_lib/cloudinary";
+
+function parseAspectMode(val: unknown): AspectMode {
+  if (val === "16:9" || val === "9:16-16:9") return val;
+  return "9:16";
+}
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader("Cache-Control", "no-store");
@@ -21,9 +32,35 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   const body = parseBody(req.body);
-  const url = typeof body.url === "string" ? body.url.trim() : "";
+  const publicId =
+    typeof body.publicId === "string" ? body.publicId.trim() : "";
 
-  if (!url) return fail(res, 400, "A `url` field is required.");
+  // Mode 2: Clip + reframe an already-uploaded source video
+  if (publicId) {
+    const startSeconds = Number(body.startSeconds ?? 0);
+    const endSeconds = Number(body.endSeconds ?? 30);
+    const aspectMode = parseAspectMode(body.aspectMode);
+
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+      return fail(res, 400, "`startSeconds` and `endSeconds` must be numbers.");
+    }
+
+    try {
+      const clipped = await renderClippedReel(
+        publicId,
+        startSeconds,
+        endSeconds,
+        aspectMode,
+      );
+      return res.status(200).json({ ok: true, ...clipped });
+    } catch (err: unknown) {
+      return fail(res, 500, errorMessage(err));
+    }
+  }
+
+  // Mode 1: Upload source video
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) return fail(res, 400, "A `url` or `publicId` field is required.");
 
   try {
     new URL(url);
@@ -32,10 +69,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const result = await uploadAndReframe(url);
+    const result = await uploadSourceVideo(url);
     res.status(200).json({ ok: true, ...result });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return fail(res, 500, message);
+    return fail(res, 500, errorMessage(err));
   }
 }

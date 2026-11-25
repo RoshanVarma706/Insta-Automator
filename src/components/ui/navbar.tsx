@@ -22,7 +22,7 @@ function navClasses(isActive: boolean) {
 
 export function Navbar() {
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<PipelineStatus>({ mode: "mock", igAccount: null });
+  const [status, setStatus] = useState<PipelineStatus>({ configured: false, igAccount: null });
 
   useEffect(() => {
     let active = true;
@@ -74,14 +74,14 @@ export function Navbar() {
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                status.mode === "live" ? "bg-insta-success" : "bg-insta-warning",
+                status.configured ? "bg-insta-success" : "bg-insta-warning",
               )}
             />
-            {status.mode === "live"
+            {status.configured
               ? status.igAccount
                 ? `@${status.igAccount.username}`
-                : "Live mode"
-              : "Mock mode"}
+                : "Live"
+              : "Setup keys"}
           </span>
 
           <button
