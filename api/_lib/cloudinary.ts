@@ -74,11 +74,19 @@ function parseTwitchTimestamp(tParam: string | null): number {
   return h * 3600 + m * 60 + s;
 }
 
+const ANALYSIS_TRANSFORMATION = {
+  width: 240,
+  fps: 2,
+  bit_rate: "120k",
+  quality: "auto:low",
+  format: "mp4",
+};
+
 function buildAnalysisUrl(publicId: string): string {
   return cloudinary.url(publicId, {
     resource_type: "video",
     secure: true,
-    transformation: [{ width: 360, quality: "auto:low", format: "mp4" }],
+    transformation: [ANALYSIS_TRANSFORMATION],
   });
 }
 
@@ -91,6 +99,8 @@ async function uploadBufferToCloudinary(
       {
         resource_type: "video",
         folder: "insta-auto/sources",
+        eager: [ANALYSIS_TRANSFORMATION],
+        eager_async: true,
       },
       (error, result) => {
         if (error || !result) {
@@ -162,6 +172,8 @@ async function uploadTwitchClip(
   const result = await cloudinary.uploader.upload(signedUrl, {
     resource_type: "video",
     folder: "insta-auto/sources",
+    eager: [ANALYSIS_TRANSFORMATION],
+    eager_async: true,
   });
 
   return {
@@ -420,6 +432,8 @@ async function uploadYouTubeToCloudinary(
       {
         resource_type: "video",
         folder: "insta-auto/sources",
+        eager: [ANALYSIS_TRANSFORMATION],
+        eager_async: true,
       },
       (error, result) => {
         if (error || !result) {
@@ -477,6 +491,8 @@ export async function uploadSourceVideo(
   const result = await cloudinary.uploader.upload(targetUrl, {
     resource_type: "video",
     folder: "insta-auto/sources",
+    eager: [ANALYSIS_TRANSFORMATION],
+    eager_async: true,
   });
 
   return {
