@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+pnpm-lock.yaml
+yarn.lock
+p-lock.yaml
+
+# Environment variables
+.env
+
+# Production builds
+dist
+out
+
+# IDE
+.vscode
+.idea
+
+# Logs
+*.log
+
+# Mac
+.DS_Store
