@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: insta-automation
+    env: node
+    plan: free
+    buildCommand: npm run build
+    startCommand: npm run preview
+    envVariables:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      CLOUDINARY_URL: ${CLOUDINARY_URL}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN}
+      IG_USER_ID: ${IG_USER_ID}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+
+trigger:
+  branch: main
