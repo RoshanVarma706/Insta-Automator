@@ -11,14 +11,14 @@
  *             "containerId": "…", "mediaId": "…" (if published) }
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail } from "./_lib/types";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { parseBody, fail } from "./_lib/types.js";
 import {
   getIgUserId,
   createReelContainer,
   checkContainerStatus,
   publishReel,
-} from "./_lib/instagram";
+} from "./_lib/instagram.js";
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));

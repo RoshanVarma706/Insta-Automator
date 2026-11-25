@@ -8,13 +8,13 @@
  * Response: { "ok": true, "status": "processing"|"published"|"error", … }
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { fail } from "./_lib/types";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { fail } from "./_lib/types.js";
 import {
   getIgUserId,
   checkContainerStatus,
   publishReel,
-} from "./_lib/instagram";
+} from "./_lib/instagram.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader("Cache-Control", "no-store");

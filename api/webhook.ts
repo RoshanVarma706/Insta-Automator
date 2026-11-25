@@ -14,20 +14,20 @@
  * GET /api/webhook -> health check
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail, errorMessage } from "./_lib/types";
-import { analyzeViralClips } from "./_lib/gemini";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { parseBody, fail, errorMessage } from "./_lib/types.js";
+import { analyzeViralClips } from "./_lib/gemini.js";
 import {
   uploadSourceVideo,
   renderClippedReel,
   type AspectMode,
-} from "./_lib/cloudinary";
+} from "./_lib/cloudinary.js";
 import {
   getIgUserId,
   createReelContainer,
   checkContainerStatus,
   publishReel,
-} from "./_lib/instagram";
+} from "./_lib/instagram.js";
 
 type Source = "youtube" | "instagram" | "generic";
 

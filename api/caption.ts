@@ -9,9 +9,9 @@
  * Response: { "ok": true, "clips": ViralClip[] }
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail, errorMessage } from "./_lib/types";
-import { analyzeViralClips } from "./_lib/gemini";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { parseBody, fail, errorMessage } from "./_lib/types.js";
+import { analyzeViralClips } from "./_lib/gemini.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader("Cache-Control", "no-store");

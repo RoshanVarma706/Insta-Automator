@@ -3,9 +3,9 @@
  * POST /api/jobs       -> create or update a job record in Supabase
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail } from "./_lib/types";
-import { createJob, listJobs, updateJob, type JobStatus } from "./_lib/supabase";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { parseBody, fail } from "./_lib/types.js";
+import { createJob, listJobs, updateJob, type JobStatus } from "./_lib/supabase.js";
 
 const VALID_STATUSES: JobStatus[] = [
   "pending",

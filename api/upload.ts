@@ -10,13 +10,13 @@
  *     Clips the exact viral segment and reframes it to 1080×1920 MP4.
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { parseBody, fail, errorMessage } from "./_lib/types";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { parseBody, fail, errorMessage } from "./_lib/types.js";
 import {
   uploadSourceVideo,
   renderClippedReel,
   type AspectMode,
-} from "./_lib/cloudinary";
+} from "./_lib/cloudinary.js";
 
 function parseAspectMode(val: unknown): AspectMode {
   if (val === "16:9" || val === "9:16-16:9") return val;

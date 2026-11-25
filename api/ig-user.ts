@@ -7,9 +7,9 @@
  * to auto-detect whether the real pipeline is available.
  */
 
-import type { ApiRequest, ApiResponse } from "./_lib/types";
-import { fail } from "./_lib/types";
-import { getIgUserId } from "./_lib/instagram";
+import type { ApiRequest, ApiResponse } from "./_lib/types.js";
+import { fail } from "./_lib/types.js";
+import { getIgUserId } from "./_lib/instagram.js";
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader("Cache-Control", "no-store");
