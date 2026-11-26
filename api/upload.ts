@@ -16,11 +16,18 @@ import {
   uploadSourceVideo,
   renderClippedReel,
   type AspectMode,
+  type CaptionStyle,
+  type SubtitleCueInput,
 } from "./_lib/cloudinary.js";
 
 function parseAspectMode(val: unknown): AspectMode {
   if (val === "16:9" || val === "9:16-16:9") return val;
   return "9:16";
+}
+
+function parseCaptionStyle(val: unknown): CaptionStyle {
+  if (val === "clean" || val === "neon" || val === "cinema") return val;
+  return "viral";
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
@@ -40,6 +47,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const startSeconds = Number(body.startSeconds ?? 0);
     const endSeconds = Number(body.endSeconds ?? 30);
     const aspectMode = parseAspectMode(body.aspectMode);
+    const captionStyle = parseCaptionStyle(body.captionStyle);
+    const captionsEnabled = body.captionsEnabled !== false;
+    const hookTitle =
+      typeof body.hookTitle === "string" ? body.hookTitle.trim() : undefined;
+    const subtitles = Array.isArray(body.subtitles)
+      ? (body.subtitles as SubtitleCueInput[])
+      : undefined;
 
     if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
       return fail(res, 400, "`startSeconds` and `endSeconds` must be numbers.");
@@ -50,7 +64,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         publicId,
         startSeconds,
         endSeconds,
-        aspectMode,
+        {
+          aspectMode,
+          captionsEnabled,
+          captionStyle,
+          hookTitle,
+          subtitles,
+        },
       );
       return res.status(200).json({ ok: true, ...clipped });
     } catch (err: unknown) {

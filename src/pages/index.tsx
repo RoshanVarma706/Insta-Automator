@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Send,
   Sparkles,
+  Subtitles,
   Tv,
   Youtube,
 } from "lucide-react";
@@ -30,11 +31,13 @@ import {
 } from "@/components/ui";
 import {
   ASPECT_OPTIONS,
+  CAPTION_STYLE_OPTIONS,
   PIPELINE_STEPS,
   SOURCE_OPTIONS,
   hostnameOf,
   isValidVideoUrl,
   type AspectMode,
+  type CaptionStyle,
   type Source,
 } from "@/lib/mock";
 import {
@@ -69,6 +72,8 @@ export default function Home() {
   const [clipCount, setClipCount] = useState<number>(1);
   const [targetDuration, setTargetDuration] = useState<number>(30);
   const [aspectMode, setAspectMode] = useState<AspectMode>("9:16-16:9");
+  const [captionsEnabled, setCaptionsEnabled] = useState<boolean>(true);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>("viral");
   const [status, setStatus] = useState<RunStatus>("idle");
   const [activeStep, setActiveStep] = useState(-1);
   const [results, setResults] = useState<GeneratedReel[]>([]);
@@ -122,6 +127,8 @@ export default function Home() {
         count: clipCount,
         targetDuration,
         aspectMode,
+        captionsEnabled,
+        captionStyle,
         onStep: (index) => {
           if (!cancelled.current) setActiveStep(index);
         },
@@ -426,6 +433,96 @@ export default function Home() {
               </div>
             </div>
 
+            <div className="space-y-3 rounded-xl border border-insta-border bg-white/80 p-3.5">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-insta-primary/10 text-insta-primary">
+                    <Subtitles className="h-4.5 w-4.5" />
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-insta-text">
+                      Burned-in on-screen captions
+                    </p>
+                    <p className="text-xs leading-snug text-insta-muted">
+                      {captionsEnabled
+                        ? aspectMode === "9:16-16:9"
+                          ? "Top viral hook + verbatim synced captions placed cleanly below the 16:9 video."
+                          : "Verbatim speech captions placed in the safe lower viewing zone."
+                        : "Disabled — clean video with no text overlays."}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={captionsEnabled}
+                  aria-label="Toggle burned-in on-screen captions"
+                  disabled={status === "running"}
+                  onClick={() => setCaptionsEnabled((v) => !v)}
+                  className={cn(
+                    "relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-60",
+                    captionsEnabled
+                      ? "bg-[linear-gradient(135deg,#e1306c,#fd1f1f_55%,#a855f7)]"
+                      : "bg-insta-border",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all",
+                      captionsEnabled ? "left-[22px]" : "left-0.5",
+                    )}
+                  />
+                </button>
+              </div>
+
+              {captionsEnabled ? (
+                <div className="border-t border-insta-border/70 pt-3">
+                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-insta-muted">
+                    Caption type
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {CAPTION_STYLE_OPTIONS.map((styleOpt) => {
+                      const selected = captionStyle === styleOpt.id;
+                      return (
+                        <button
+                          key={styleOpt.id}
+                          type="button"
+                          onClick={() => setCaptionStyle(styleOpt.id)}
+                          disabled={status === "running"}
+                          aria-pressed={selected}
+                          className={cn(
+                            "flex flex-col items-start gap-1.5 rounded-xl border p-2.5 text-left transition disabled:opacity-60",
+                            selected
+                              ? "border-insta-primary/50 bg-insta-primary/5 ring-1 ring-insta-primary/20"
+                              : "border-insta-border bg-white hover:border-insta-primary/30",
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "inline-block rounded px-2 py-0.5 text-[10px] tracking-wide",
+                              styleOpt.previewBg,
+                              styleOpt.previewText,
+                            )}
+                          >
+                            Aa Caption
+                          </span>
+                          <span>
+                            <span className="block text-xs font-semibold text-insta-text">
+                              {styleOpt.label}
+                            </span>
+                            <span className="block text-[11px] leading-snug text-insta-muted">
+                              {styleOpt.hint}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <div className="flex flex-col gap-3 sm:flex-row">
               <Button
                 onClick={handleGenerate}
@@ -536,6 +633,7 @@ export default function Home() {
                       src={reel.videoUrl}
                       controls
                       playsInline
+                      preload="auto"
                       className={cn(
                         "w-full object-contain",
                         reel.aspectMode === "16:9" ? "aspect-video max-h-56" : "aspect-[9/16] max-h-72",
@@ -547,6 +645,25 @@ export default function Home() {
                     <span className="font-semibold text-insta-primary">Viral hook: </span>
                     {reel.hookReason}
                   </div>
+
+                  {reel.subtitles.length > 0 ? (
+                    <details className="rounded-lg border border-insta-border bg-white/70 p-3 text-xs">
+                      <summary className="cursor-pointer font-semibold text-insta-text">
+                        On-screen captions ({reel.subtitles.length} synced cues
+                        {reel.captionsBurned ? " · burned into video" : ""})
+                      </summary>
+                      <ul className="mt-2 max-h-40 space-y-1.5 overflow-y-auto text-insta-muted">
+                        {reel.subtitles.map((cue, cueIdx) => (
+                          <li key={cueIdx} className="flex gap-2">
+                            <span className="shrink-0 font-mono text-[11px] text-insta-primary">
+                              {cue.start.toFixed(1)}s–{cue.end.toFixed(1)}s
+                            </span>
+                            <span className="text-insta-text">{cue.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
 
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between gap-2">
@@ -637,7 +754,7 @@ export default function Home() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">What happens next</CardTitle>
-                <CardDescription>Three automated clipping steps, one click.</CardDescription>
+                <CardDescription>Four automated clipping steps, one click.</CardDescription>
               </CardHeader>
               <CardContent>
                 <ol className="space-y-3">

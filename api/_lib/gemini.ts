@@ -1,21 +1,29 @@
 /**
- * Gemini API — viral clip identification, timestamping, and captioning.
+ * Gemini API — viral clip identification + verbatim MP3 speech transcription.
  *
- * Designed to stay well inside Vercel's serverless execution budget:
- *  - Uses MINIMAL thinking on Gemini 3 models for 3–5x faster responses.
- *  - Caps inline video proxy download at 14s and each Gemini call at 20s.
- *  - Enforces a 42s total wall-clock budget and falls back cleanly to fast
- *    metadata analysis instead of letting Vercel return a 504 timeout.
+ * Pass 1 (`analyzeViralClips`): watches the video to select the strongest viral
+ *   start/end timestamps (avoiding silent intros and mid-sentence cuts) and writes
+ *   the post caption + hashtags.
+ * Pass 2 (`transcribeClipAudio`): listens directly to the extracted MP3 audio of
+ *   the clipped segment and produces exact verbatim, time-synced subtitle cues.
  */
 
 const GEMINI_MODELS = [
   "gemini-3-flash-preview",
-  "gemini-3.8-flash",
-  "gemini-3.1-flash-lite",
   "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
 ] as const;
 
-const TOTAL_BUDGET_MS = 42_000;
+const TOTAL_BUDGET_MS = 54_000;
+
+export type CaptionStyle = "viral" | "clean" | "neon" | "cinema";
+
+export type SubtitleCue = {
+  start: number;
+  end: number;
+  text: string;
+};
 
 export type ViralClip = {
   title: string;
@@ -24,6 +32,7 @@ export type ViralClip = {
   hookReason: string;
   caption: string;
   hashtags: string[];
+  subtitles: SubtitleCue[];
 };
 
 export type AnalyzeClipsInput = {
@@ -58,8 +67,8 @@ function getDurationBounds(targetDuration: number): {
   };
 }
 
-function extractFirstJsonObject(raw: string): string | null {
-  const start = raw.indexOf("{");
+function extractFirstJson(raw: string, openChar: "{" | "[", closeChar: "}" | "]"): string | null {
+  const start = raw.indexOf(openChar);
   if (start === -1) return null;
 
   let depth = 0;
@@ -81,9 +90,9 @@ function extractFirstJsonObject(raw: string): string | null {
 
     if (ch === '"') {
       inString = true;
-    } else if (ch === "{") {
+    } else if (ch === openChar) {
       depth += 1;
-    } else if (ch === "}") {
+    } else if (ch === closeChar) {
       depth -= 1;
       if (depth === 0) {
         return raw.slice(start, i + 1);
@@ -94,27 +103,36 @@ function extractFirstJsonObject(raw: string): string | null {
   return null;
 }
 
-function parseClipsJson(raw: string): { clips?: Partial<ViralClip>[] } | null {
+function parseJsonSafe<T>(raw: string): T | null {
   const trimmed = raw
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
 
   try {
-    const direct = JSON.parse(trimmed) as { clips?: Partial<ViralClip>[] };
-    if (direct && typeof direct === "object") return direct;
+    return JSON.parse(trimmed) as T;
   } catch {
     // Fall through to balanced extractor
   }
 
-  const extracted = extractFirstJsonObject(trimmed);
-  if (!extracted) return null;
+  const firstObj = trimmed.indexOf("{");
+  const firstArr = trimmed.indexOf("[");
+  const tryOrder: [("{" | "["), ("}" | "]")][] =
+    firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)
+      ? [["[", "]"], ["{", "}"]]
+      : [["{", "}"], ["[", "]"]];
 
-  try {
-    return JSON.parse(extracted) as { clips?: Partial<ViralClip>[] };
-  } catch {
-    return null;
+  for (const [open, close] of tryOrder) {
+    const extracted = extractFirstJson(trimmed, open, close);
+    if (!extracted) continue;
+    try {
+      return JSON.parse(extracted) as T;
+    } catch {
+      continue;
+    }
   }
+
+  return null;
 }
 
 function buildClipPrompt(input: AnalyzeClipsInput): string {
@@ -142,8 +160,8 @@ ${durationHint}
 
 CRITICAL CLIPPING RULES:
 1. Identify the most famous, viral, emotionally engaging, or high-value moments (strong hooks, reveals, punchlines, clutch moments, or peak action).
-2. STRONG STARTING POINT: Each \`startSeconds\` MUST begin cleanly at the start of a sentence, hook, or beat — NEVER mid-sentence or during dead air.
-3. STRONG ENDING POINT: Each \`endSeconds\` MUST end cleanly at the completion of a thought, punchline, reveal, or natural pause — NEVER mid-word.
+2. ZERO SILENT INTROS: Each \`startSeconds\` MUST start right at the exact first spoken word, hook, or peak action — NEVER during dead silence or idle waiting before someone starts speaking.
+3. COMPLETE ENDING: Each \`endSeconds\` MUST end right after the speaker finishes their final sentence, answer, or punchline — NEVER cut off mid-sentence or mid-thought.
 ${endingRule}
 5. NON-OVERLAPPING: Clips must cover distinct moments and must not overlap.
 6. Rank from most viral to least viral.
@@ -152,32 +170,34 @@ Return ONLY valid JSON:
 {
   "clips": [
     {
-      "title": "Catchy 4-8 word clip title",
+      "title": "Catchy 4-7 word hook title",
       "startSeconds": 12,
       "endSeconds": ${12 + targetDuration},
       "hookReason": "1 short sentence explaining why this clip will go viral and why the start/end points are strong",
-      "caption": "Scroll-stopping caption (1-2 sentences + 1-2 emojis)",
+      "caption": "Scroll-stopping Instagram caption (1-2 sentences + 1-2 emojis)",
       "hashtags": ["#reels", "#viral", "#fyp", "#trending", "#instagood"]
     }
   ]
 }`;
 }
 
-async function callSingleGeminiModel(
+async function callSingleGemini<T>(
   model: string,
   apiKey: string,
   parts: unknown[],
   timeoutMs: number,
-): Promise<{ clips?: Partial<ViralClip>[] } | { error: string }> {
+  options: { temperature: number; thinkingLevel: "MINIMAL" | "LOW"; maxOutputTokens: number },
+  validator: (parsed: T) => boolean,
+): Promise<{ data: T } | { error: string }> {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const generationConfig: Record<string, unknown> = {
-    temperature: 0.7,
-    maxOutputTokens: 2048,
+    temperature: options.temperature,
+    maxOutputTokens: options.maxOutputTokens,
     responseMimeType: "application/json",
   };
 
   if (model.startsWith("gemini-3")) {
-    generationConfig.thinkingConfig = { thinkingLevel: "MINIMAL" };
+    generationConfig.thinkingConfig = { thinkingLevel: options.thinkingLevel };
   }
 
   try {
@@ -208,13 +228,13 @@ async function callSingleGeminiModel(
       .filter(Boolean);
 
     for (const chunk of [...textParts, textParts.join("\n")]) {
-      const parsed = parseClipsJson(chunk);
-      if (parsed && Array.isArray(parsed.clips) && parsed.clips.length > 0) {
-        return parsed;
+      const parsed = parseJsonSafe<T>(chunk);
+      if (parsed && validator(parsed)) {
+        return { data: parsed };
       }
     }
 
-    return { error: `${model} returned unparseable or empty clips JSON.` };
+    return { error: `${model} returned unparseable or empty JSON.` };
   } catch (err) {
     return {
       error: `${model}: ${err instanceof Error ? err.message : String(err)}`,
@@ -222,29 +242,71 @@ async function callSingleGeminiModel(
   }
 }
 
-async function callGeminiWithBudget(
+async function callGeminiWithBudget<T>(
   apiKey: string,
   parts: unknown[],
   deadlineMs: number,
-): Promise<{ clips?: Partial<ViralClip>[] }> {
+  options: { temperature: number; thinkingLevel: "MINIMAL" | "LOW"; maxOutputTokens: number },
+  validator: (parsed: T) => boolean,
+): Promise<T> {
   let lastError = "Gemini timed out.";
 
   for (const model of GEMINI_MODELS) {
     const remaining = deadlineMs - Date.now();
-    if (remaining < 5000) break;
+    if (remaining < 4000) break;
 
-    const timeoutMs = Math.min(22_000, remaining - 1000);
-    const result = await callSingleGeminiModel(model, apiKey, parts, timeoutMs);
+    const timeoutMs = Math.min(35_000, remaining - 800);
+    const result = await callSingleGemini<T>(
+      model,
+      apiKey,
+      parts,
+      timeoutMs,
+      options,
+      validator,
+    );
 
-    if ("clips" in result && result.clips) {
-      return result;
-    }
-    if ("error" in result) {
-      lastError = result.error;
-    }
+    if ("data" in result) return result.data;
+    lastError = result.error;
   }
 
   throw new Error(`Gemini API failed: ${lastError}`);
+}
+
+function normalizeSubtitles(
+  rawSubs: Partial<SubtitleCue>[],
+  clipDuration: number,
+  captionStyle: CaptionStyle,
+): SubtitleCue[] {
+  const cleaned: SubtitleCue[] = [];
+  let cursor = 0;
+
+  for (const raw of rawSubs) {
+    let text = typeof raw.text === "string" ? raw.text.replace(/\s+/g, " ").trim() : "";
+    if (!text) continue;
+
+    if (captionStyle === "viral" || captionStyle === "neon") {
+      text = text.toUpperCase();
+    }
+
+    let start = Number(raw.start);
+    let end = Number(raw.end);
+    if (!Number.isFinite(start)) start = cursor;
+    if (!Number.isFinite(end)) end = start + 2.0;
+
+    start = Math.max(cursor, Math.min(clipDuration - 0.3, start));
+    end = Math.max(start + 0.4, Math.min(clipDuration, end));
+
+    if (start >= clipDuration - 0.2) break;
+
+    cleaned.push({
+      start: Number(start.toFixed(2)),
+      end: Number(end.toFixed(2)),
+      text,
+    });
+    cursor = end;
+  }
+
+  return cleaned;
 }
 
 function normalizeClips(
@@ -297,11 +359,12 @@ function normalizeClips(
         Array.isArray(clip.hashtags) && clip.hashtags.length > 0
           ? clip.hashtags.map((t) => (t.startsWith("#") ? t : `#${t}`))
           : ["#reels", "#viral", "#fyp", "#trending", "#instagood"],
+      subtitles: [],
     };
   });
 }
 
-async function fetchInlineVideoPart(
+async function fetchInlineMediaPart(
   analysisUrl: string,
   timeoutMs: number,
 ): Promise<unknown | null> {
@@ -311,12 +374,15 @@ async function fetchInlineVideoPart(
     });
     if (!res.ok) return null;
     const contentLength = Number(res.headers.get("content-length") || 0);
-    if (contentLength > 9 * 1024 * 1024) return null;
+    if (contentLength > 12 * 1024 * 1024) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength === 0 || buf.byteLength > 9 * 1024 * 1024) return null;
+    if (buf.byteLength === 0 || buf.byteLength > 12 * 1024 * 1024) return null;
+    const mimeType = analysisUrl.toLowerCase().includes(".mp3")
+      ? "audio/mp3"
+      : "video/mp4";
     return {
       inlineData: {
-        mimeType: "video/mp4",
+        mimeType,
         data: buf.toString("base64"),
       },
     };
@@ -326,9 +392,7 @@ async function fetchInlineVideoPart(
 }
 
 /**
- * Analyzes a video with Gemini and returns `count` viral clips with
- * strong start/end timestamps matching `targetDuration` (extending up to
- * +12s for 30s/45s to finish cleanly, and strictly <= 60s when 60s selected).
+ * Pass 1: Identifies the most viral clips, start/end timestamps, and post copy.
  */
 export async function analyzeViralClips(
   input: AnalyzeClipsInput,
@@ -349,21 +413,34 @@ export async function analyzeViralClips(
       },
     });
   } else if (input.analysisUrl) {
-    // Cap proxy download to 14s so we always have plenty of budget left for Gemini.
-    const inlinePart = await fetchInlineVideoPart(input.analysisUrl, 14_000);
+    const inlinePart = await fetchInlineMediaPart(input.analysisUrl, 25_000);
     if (inlinePart) parts.push(inlinePart);
   }
 
   parts.push({ text: prompt });
 
+  const validator = (p: { clips?: Partial<ViralClip>[] }) =>
+    Boolean(p && Array.isArray(p.clips) && p.clips.length > 0);
+
   let parsed: { clips?: Partial<ViralClip>[] };
   try {
-    // Reserve 8s at the end for a fast text-only fallback if video attempts 503/timeout.
-    const videoDeadline = parts.length > 1 ? hardDeadline - 8_000 : hardDeadline;
-    parsed = await callGeminiWithBudget(apiKey, parts, videoDeadline);
+    const mediaDeadline = parts.length > 1 ? hardDeadline - 4_000 : hardDeadline;
+    parsed = await callGeminiWithBudget(
+      apiKey,
+      parts,
+      mediaDeadline,
+      { temperature: 0.5, thinkingLevel: "LOW", maxOutputTokens: 2048 },
+      validator,
+    );
   } catch (err) {
     if (parts.length > 1 && hardDeadline - Date.now() >= 4_000) {
-      parsed = await callGeminiWithBudget(apiKey, [{ text: prompt }], hardDeadline);
+      parsed = await callGeminiWithBudget(
+        apiKey,
+        [{ text: prompt }],
+        hardDeadline,
+        { temperature: 0.7, thinkingLevel: "MINIMAL", maxOutputTokens: 2048 },
+        validator,
+      );
     } else {
       throw err;
     }
@@ -375,4 +452,109 @@ export async function analyzeViralClips(
     input.targetDuration,
     input.totalDuration,
   );
+}
+
+export type TranscribeResult = {
+  subtitles: SubtitleCue[];
+  title?: string;
+  caption?: string;
+  hashtags?: string[];
+};
+
+/**
+ * Pass 2: Downloads the exact MP3 audio snippet of the clipped segment,
+ * transcribes ONLY the verbatim spoken words with accurate timestamps, and
+ * refines the clip title, post caption, and hashtags to match what is actually
+ * spoken in this exact segment.
+ */
+export async function transcribeClipAudio(
+  audioUrl: string,
+  clipDuration: number,
+  captionStyle: CaptionStyle = "viral",
+): Promise<TranscribeResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
+
+  const audioRes = await fetch(audioUrl, {
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!audioRes.ok) {
+    throw new Error(`Could not fetch clip audio for transcription (${audioRes.status}).`);
+  }
+
+  const audioBuf = Buffer.from(await audioRes.arrayBuffer());
+  if (audioBuf.byteLength === 0) {
+    return { subtitles: [] };
+  }
+
+  const deadline = Date.now() + 40_000;
+
+  const wordsPerCue =
+    captionStyle === "clean" || captionStyle === "cinema"
+      ? "3 to 6 words"
+      : "2 to 4 punchy words";
+
+  const prompt = `Listen carefully to this ${clipDuration}-second audio clip and:
+1. Transcribe ONLY the exact spoken words verbatim into timed \`subtitles\`.
+2. Write a catchy \`title\`, \`caption\`, and \`hashtags\` based STRICTLY on what is actually spoken in THIS audio clip (do not reference unrelated topics).
+
+STRICT TRANSCRIPTION RULES:
+- Transcribe word-for-word what is actually spoken. NEVER invent, guess, or paraphrase words that were not said.
+- If there is silence, music, or background noise with no speech, leave a gap — do NOT fill silent sections with made-up text.
+- Break spoken sentences into ${wordsPerCue} per subtitle cue so viewers can read effortlessly while watching.
+- Set accurate \`start\` and \`end\` timestamps in seconds from \`0.0\` to \`${clipDuration.toFixed(1)}\`, aligned tightly to when each phrase is spoken.
+- Keep natural punctuation (? ! , .) for readability.
+
+Return ONLY valid JSON:
+{
+  "title": "Catchy 4-7 word hook title matching this clip",
+  "caption": "Scroll-stopping Instagram caption matching what is said (1-2 sentences + 1-2 emojis)",
+  "hashtags": ["#reels", "#viral", "#fyp", "#trending"],
+  "subtitles": [
+    { "start": 0.4, "end": 2.1, "text": "Exact spoken words" }
+  ]
+}`;
+
+  type SubPayload =
+    | Partial<SubtitleCue>[]
+    | {
+        title?: string;
+        caption?: string;
+        hashtags?: string[];
+        subtitles?: Partial<SubtitleCue>[];
+      };
+
+  const parsed = await callGeminiWithBudget<SubPayload>(
+    apiKey,
+    [
+      {
+        inlineData: {
+          mimeType: "audio/mp3",
+          data: audioBuf.toString("base64"),
+        },
+      },
+      { text: prompt },
+    ],
+    deadline,
+    { temperature: 0.1, thinkingLevel: "LOW", maxOutputTokens: 3000 },
+    (payload) => {
+      if (Array.isArray(payload)) return true;
+      return Boolean(payload && Array.isArray(payload.subtitles));
+    },
+  );
+
+  if (Array.isArray(parsed)) {
+    return { subtitles: normalizeSubtitles(parsed, clipDuration, captionStyle) };
+  }
+
+  return {
+    subtitles: normalizeSubtitles(parsed.subtitles ?? [], clipDuration, captionStyle),
+    title: parsed.title?.trim() || undefined,
+    caption: parsed.caption?.trim() || undefined,
+    hashtags:
+      Array.isArray(parsed.hashtags) && parsed.hashtags.length > 0
+        ? parsed.hashtags.map((t) => (t.startsWith("#") ? t : `#${t}`))
+        : undefined,
+  };
 }

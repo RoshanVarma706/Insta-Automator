@@ -1,4 +1,4 @@
-import { PIPELINE_STEPS, type AspectMode, type Source } from "./mock";
+import { PIPELINE_STEPS, type AspectMode, type CaptionStyle, type Source } from "./mock";
 
 export type IgAccountInfo = {
   igUserId: string;
@@ -13,12 +13,20 @@ export type PipelineStatus = {
   error?: string;
 };
 
+export type SubtitleCue = {
+  start: number;
+  end: number;
+  text: string;
+};
+
 export type ViralClipInput = {
   url: string;
   source: Source;
   count: number;
   targetDuration: number;
   aspectMode: AspectMode;
+  captionsEnabled: boolean;
+  captionStyle: CaptionStyle;
   onStep?: (index: number) => void;
   isCancelled?: () => boolean;
 };
@@ -32,6 +40,9 @@ export type GeneratedReel = {
   hookReason: string;
   caption: string;
   hashtags: string[];
+  subtitles: SubtitleCue[];
+  captionsBurned: boolean;
+  captionStyle: CaptionStyle;
   videoUrl: string;
   mediaId?: string;
   containerId?: string;
@@ -140,6 +151,8 @@ export async function runRealPipeline({
   count,
   targetDuration,
   aspectMode,
+  captionsEnabled,
+  captionStyle,
   onStep,
   isCancelled,
 }: ViralClipInput): Promise<GeneratedReel[]> {
@@ -182,40 +195,92 @@ export async function runRealPipeline({
       analysisUrl: uploaded.analysisUrl,
     });
 
-    // Step 2: Clip & 9:16 reframe each segment in Cloudinary
+    // Step 2: Verbatim MP3 speech transcription for each viral clip
     if (isCancelled?.()) throw new Error("cancelled");
     onStep?.(2);
+
+    const clipTranscriptions: {
+      subtitles: SubtitleCue[];
+      title?: string;
+      caption?: string;
+      hashtags?: string[];
+    }[] = [];
+    for (const clip of analysis.clips) {
+      if (isCancelled?.()) throw new Error("cancelled");
+      if (!captionsEnabled) {
+        clipTranscriptions.push({ subtitles: [] });
+        continue;
+      }
+
+      const transcribed = await postJson<{
+        subtitles: SubtitleCue[];
+        title?: string;
+        caption?: string;
+        hashtags?: string[];
+      }>(
+        "/api/transcribe",
+        {
+          publicId: uploaded.publicId,
+          startSeconds: clip.startSeconds,
+          endSeconds: clip.endSeconds,
+          captionStyle,
+        },
+      );
+      clipTranscriptions.push({
+        subtitles: transcribed.subtitles ?? [],
+        title: transcribed.title,
+        caption: transcribed.caption,
+        hashtags: transcribed.hashtags,
+      });
+    }
+
+    // Step 3: Clip, format & burn captions in Cloudinary
+    if (isCancelled?.()) throw new Error("cancelled");
+    onStep?.(3);
 
     const renderedReels: GeneratedReel[] = [];
 
     for (let i = 0; i < analysis.clips.length; i++) {
       if (isCancelled?.()) throw new Error("cancelled");
       const clip = analysis.clips[i];
+      const tr = clipTranscriptions[i] ?? { subtitles: [] };
+      const finalTitle = tr.title || clip.title;
+      const finalCaption = tr.caption || clip.caption;
+      const finalHashtags = tr.hashtags?.length ? tr.hashtags : clip.hashtags;
 
       const rendered = await postJson<{
         publicId: string;
         clipUrl: string;
         format: string;
         aspectMode: AspectMode;
+        captionStyle: CaptionStyle;
         startSeconds: number;
         endSeconds: number;
         durationSeconds: number;
+        captionsBurned?: boolean;
       }>("/api/upload", {
         publicId: uploaded.publicId,
         startSeconds: clip.startSeconds,
         endSeconds: clip.endSeconds,
         aspectMode,
+        captionsEnabled,
+        captionStyle,
+        hookTitle: finalTitle,
+        subtitles: tr.subtitles,
       });
 
       renderedReels.push({
         id: `${uploaded.publicId}_clip_${i + 1}`,
-        title: clip.title,
+        title: finalTitle,
         startSeconds: rendered.startSeconds,
         endSeconds: rendered.endSeconds,
         durationSeconds: rendered.durationSeconds,
         hookReason: clip.hookReason,
-        caption: clip.caption,
-        hashtags: clip.hashtags,
+        caption: finalCaption,
+        hashtags: finalHashtags,
+        subtitles: tr.subtitles,
+        captionsBurned: Boolean(rendered.captionsBurned),
+        captionStyle: rendered.captionStyle || captionStyle,
         videoUrl: rendered.clipUrl,
         format: rendered.format || "1080×1920",
         aspectMode: rendered.aspectMode || aspectMode,

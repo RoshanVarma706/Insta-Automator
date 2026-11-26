@@ -16,11 +16,13 @@
 
 import type { ApiRequest, ApiResponse } from "./_lib/types.js";
 import { parseBody, fail, errorMessage } from "./_lib/types.js";
-import { analyzeViralClips } from "./_lib/gemini.js";
+import { analyzeViralClips, transcribeClipAudio } from "./_lib/gemini.js";
 import {
+  buildClipAudioUrl,
   uploadSourceVideo,
   renderClippedReel,
   type AspectMode,
+  type CaptionStyle,
 } from "./_lib/cloudinary.js";
 import {
   getIgUserId,
@@ -117,15 +119,38 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN!;
     const { igUserId } = await getIgUserId(accessToken);
 
+    const captionsEnabled = body.captionsEnabled !== false;
+    const captionStyle: CaptionStyle =
+      body.captionStyle === "clean" ||
+      body.captionStyle === "neon" ||
+      body.captionStyle === "cinema"
+        ? body.captionStyle
+        : "viral";
     const results = [];
     for (const clip of viralClips) {
+      const transcribed = captionsEnabled
+        ? await transcribeClipAudio(
+            buildClipAudioUrl(uploaded.publicId, clip.startSeconds, clip.endSeconds),
+            Math.max(3, clip.endSeconds - clip.startSeconds),
+            captionStyle,
+          )
+        : { subtitles: [] };
+      const title = transcribed.title || clip.title;
+      const captionText = transcribed.caption || clip.caption;
+      const hashtags = transcribed.hashtags || clip.hashtags;
       const rendered = await renderClippedReel(
         uploaded.publicId,
         clip.startSeconds,
         clip.endSeconds,
-        aspectMode,
+        {
+          aspectMode,
+          captionsEnabled,
+          captionStyle,
+          hookTitle: title,
+          subtitles: transcribed.subtitles,
+        },
       );
-      const fullCaption = `${clip.caption}\n\n${clip.hashtags.join(" ")}`;
+      const fullCaption = `${captionText}\n\n${hashtags.join(" ")}`;
       const containerId = await createReelContainer(
         igUserId,
         rendered.clipUrl,
@@ -149,13 +174,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
 
       results.push({
-        title: clip.title,
+        title,
         startSeconds: rendered.startSeconds,
         endSeconds: rendered.endSeconds,
         durationSeconds: rendered.durationSeconds,
         hookReason: clip.hookReason,
-        caption: clip.caption,
-        hashtags: clip.hashtags,
+        caption: captionText,
+        hashtags,
         cloudinaryUrl: rendered.clipUrl,
         containerId,
         mediaId: mediaId || null,
