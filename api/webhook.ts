@@ -127,20 +127,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         ? body.captionStyle
         : "viral";
     const results = [];
-    for (const clip of viralClips) {
+    for (let i = 0; i < viralClips.length; i++) {
+      const clip = viralClips[i];
       const transcribed = captionsEnabled
         ? await transcribeClipAudio(
             buildClipAudioUrl(uploaded.publicId, clip.startSeconds, clip.endSeconds),
             Math.max(3, clip.endSeconds - clip.startSeconds),
             captionStyle,
           )
-        : { subtitles: [] };
+        : { subtitles: [], trimStartOffset: 0 };
       const title = transcribed.title || clip.title;
       const captionText = transcribed.caption || clip.caption;
       const hashtags = transcribed.hashtags || clip.hashtags;
+      const finalStart = clip.startSeconds + (transcribed.trimStartOffset || 0);
       const rendered = await renderClippedReel(
         uploaded.publicId,
-        clip.startSeconds,
+        finalStart,
         clip.endSeconds,
         {
           aspectMode,
@@ -148,6 +150,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           captionStyle,
           hookTitle: title,
           subtitles: transcribed.subtitles,
+          clipIndex: i,
         },
       );
       const fullCaption = `${captionText}\n\n${hashtags.join(" ")}`;

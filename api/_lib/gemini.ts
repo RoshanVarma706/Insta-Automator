@@ -1,11 +1,12 @@
 /**
  * Gemini API — viral clip identification + verbatim MP3 speech transcription.
  *
- * Pass 1 (`analyzeViralClips`): watches the video to select the strongest viral
- *   start/end timestamps (avoiding silent intros and mid-sentence cuts) and writes
- *   the post caption + hashtags.
- * Pass 2 (`transcribeClipAudio`): listens directly to the extracted MP3 audio of
- *   the clipped segment and produces exact verbatim, time-synced subtitle cues.
+ * Pass 1 (`analyzeViralClips`): uses MEDIUM thinking on the audio track to
+ *   pick distinct, non-overlapping viral clips with strong opening hooks and
+ *   complete endings.
+ * Pass 2 (`transcribeClipAudio`): uses temperature 0.0 on the exact clipped
+ *   MP3 snippet for 1–3 word verbatim cues, refines clip title/caption, and
+ *   computes `trimStartOffset` to strip dead intro silence.
  */
 
 const GEMINI_MODELS = [
@@ -146,11 +147,16 @@ function buildClipPrompt(input: AnalyzeClipsInput): string {
 
   const endingRule =
     targetDuration >= 60
-      ? `4. DURATION HARD CAP (60s MAX): \`endSeconds - startSeconds\` MUST be between ${minDuration} and 60 seconds — NEVER exceed 60 seconds. Find a clean, complete ending at or just before the 60-second mark.`
-      : `4. SMART FLEXIBLE ENDING DURATION: Target ~${targetDuration} seconds, and EXTEND the ending up to ${maxDuration} seconds (acceptable range: ${minDuration}–${maxDuration} seconds) whenever extra seconds are needed to reach a strong, clean, complete ending (e.g., if 30s is selected and the punchline finishes cleanly at 36s, end at 36s!). Never cut mid-sentence just to hit ${targetDuration}s.`;
+      ? `4. DURATION HARD CAP (60s MAX): \`endSeconds - startSeconds\` MUST be between ${minDuration} and 60 seconds — NEVER exceed 60 seconds. End cleanly on a natural pause or completed sentence at or just before 60s.`
+      : `4. SMART FLEXIBLE ENDING DURATION: Target ~${targetDuration} seconds, and EXTEND the ending up to ${maxDuration} seconds (acceptable range: ${minDuration}–${maxDuration} seconds) whenever extra seconds are needed to finish the speaker's sentence or punchline cleanly (e.g., if 30s is selected and the punchline finishes at 36s, end at 36s!). Never cut mid-sentence just to hit ${targetDuration}s.`;
 
-  return `You are an expert short-form video editor and viral Reels strategist.
-Identify the ${count} most viral, high-retention clip(s) from this video.
+  const multiClipRule =
+    count > 1
+      ? `5. STRICTLY DISTINCT & NON-OVERLAPPING: You MUST select ${count} DIFFERENT moments from SEPARATE parts of the timeline. NEVER return duplicate or overlapping timestamps!`
+      : `5. Pick the single strongest viral moment in the entire track.`;
+
+  return `You are a viral short-form video editor (TikTok, Instagram Reels, YouTube Shorts).
+Listen carefully to the entire audio/video and pick the ${count} MOST VIRAL, self-contained clip(s).
 
 Video URL: ${videoUrl}
 Source: ${source}
@@ -158,12 +164,12 @@ ${titleHint}Requested clip count: ${count}
 Preferred duration: ${targetDuration} seconds (allowed range: ${minDuration}–${maxDuration} seconds)
 ${durationHint}
 
-CRITICAL CLIPPING RULES:
-1. Identify the most famous, viral, emotionally engaging, or high-value moments (strong hooks, reveals, punchlines, clutch moments, or peak action).
-2. ZERO SILENT INTROS: Each \`startSeconds\` MUST start right at the exact first spoken word, hook, or peak action — NEVER during dead silence or idle waiting before someone starts speaking.
-3. COMPLETE ENDING: Each \`endSeconds\` MUST end right after the speaker finishes their final sentence, answer, or punchline — NEVER cut off mid-sentence or mid-thought.
+HOW TO PICK VIRAL CLIPS WITH STRONG START & END POINTS:
+1. Scan the entire timeline from 0 to end. Look for funny stories, bold opinions, viewer Q&A hooks, emotional reactions, surprises, or heated/entertaining moments.
+2. STRONG OPENING HOOK (\`startSeconds\`): Must start AT THE EXACT BEGINNING of a compelling question, bold statement, reaction, or story opener — NEVER mid-sentence and NEVER during 2+ seconds of dead silence.
+3. STRONG ENDING PAYOFF (\`endSeconds\`): Must end RIGHT AFTER the punchline, final answer, laugh, or complete thought — NEVER mid-sentence or right before the payoff.
 ${endingRule}
-5. NON-OVERLAPPING: Clips must cover distinct moments and must not overlap.
+${multiClipRule}
 6. Rank from most viral to least viral.
 
 Return ONLY valid JSON:
@@ -173,7 +179,7 @@ Return ONLY valid JSON:
       "title": "Catchy 4-7 word hook title",
       "startSeconds": 12,
       "endSeconds": ${12 + targetDuration},
-      "hookReason": "1 short sentence explaining why this clip will go viral and why the start/end points are strong",
+      "hookReason": "Quote the exact opening hook and closing payoff explaining why this clip works",
       "caption": "Scroll-stopping Instagram caption (1-2 sentences + 1-2 emojis)",
       "hashtags": ["#reels", "#viral", "#fyp", "#trending", "#instagood"]
     }
@@ -186,7 +192,11 @@ async function callSingleGemini<T>(
   apiKey: string,
   parts: unknown[],
   timeoutMs: number,
-  options: { temperature: number; thinkingLevel: "MINIMAL" | "LOW"; maxOutputTokens: number },
+  options: {
+    temperature: number;
+    thinkingLevel: "MINIMAL" | "LOW" | "MEDIUM";
+    maxOutputTokens: number;
+  },
   validator: (parsed: T) => boolean,
 ): Promise<{ data: T } | { error: string }> {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -246,7 +256,11 @@ async function callGeminiWithBudget<T>(
   apiKey: string,
   parts: unknown[],
   deadlineMs: number,
-  options: { temperature: number; thinkingLevel: "MINIMAL" | "LOW"; maxOutputTokens: number },
+  options: {
+    temperature: number;
+    thinkingLevel: "MINIMAL" | "LOW" | "MEDIUM";
+    maxOutputTokens: number;
+  },
   validator: (parsed: T) => boolean,
 ): Promise<T> {
   let lastError = "Gemini timed out.";
@@ -291,10 +305,10 @@ function normalizeSubtitles(
     let start = Number(raw.start);
     let end = Number(raw.end);
     if (!Number.isFinite(start)) start = cursor;
-    if (!Number.isFinite(end)) end = start + 2.0;
+    if (!Number.isFinite(end)) end = start + 1.8;
 
     start = Math.max(cursor, Math.min(clipDuration - 0.3, start));
-    end = Math.max(start + 0.4, Math.min(clipDuration, end));
+    end = Math.max(start + 0.35, Math.min(clipDuration, end));
 
     if (start >= clipDuration - 0.2) break;
 
@@ -309,6 +323,36 @@ function normalizeSubtitles(
   return cleaned;
 }
 
+function overlapSeconds(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+function findNonOverlappingSlot(
+  used: { start: number; end: number }[],
+  desiredLen: number,
+  maxVideoEnd: number,
+): { start: number; end: number } | null {
+  const sorted = [...used].sort((a, b) => a.start - b.start);
+  const gaps: { start: number; end: number }[] = [];
+  let prev = 0;
+
+  for (const seg of sorted) {
+    if (seg.start - prev >= 10) {
+      gaps.push({ start: prev, end: seg.start });
+    }
+    prev = Math.max(prev, seg.end);
+  }
+  if (maxVideoEnd - prev >= 10) {
+    gaps.push({ start: prev, end: maxVideoEnd });
+  }
+
+  if (gaps.length === 0) return null;
+  gaps.sort((a, b) => b.end - b.start - (a.end - a.start));
+  const best = gaps[0];
+  const len = Math.min(desiredLen, best.end - best.start);
+  return { start: best.start, end: best.start + len };
+}
+
 function normalizeClips(
   rawClips: Partial<ViralClip>[],
   count: number,
@@ -319,36 +363,53 @@ function normalizeClips(
   const maxVideoEnd =
     totalDuration && totalDuration > 0 ? Math.floor(totalDuration) : Number.MAX_SAFE_INTEGER;
 
-  return rawClips.slice(0, count).map((clip, index) => {
+  const used: { start: number; end: number }[] = [];
+  const normalized: ViralClip[] = [];
+
+  for (let index = 0; index < Math.min(count, rawClips.length); index++) {
+    const clip = rawClips[index];
     let start = Math.max(0, Math.round(Number(clip.startSeconds) || index * targetDuration));
     let end = Math.round(Number(clip.endSeconds) || start + targetDuration);
 
     if (end <= start) {
       end = start + targetDuration;
     }
-
     if (end - start > maxDuration) {
       end = start + maxDuration;
     }
 
     if (maxVideoEnd < Number.MAX_SAFE_INTEGER) {
-      if (maxVideoEnd <= targetDuration) {
-        start = 0;
-        end = Math.min(maxVideoEnd, maxDuration);
-      } else {
-        if (start >= maxVideoEnd - 5) {
-          start = Math.max(0, maxVideoEnd - targetDuration);
-        }
-        end = Math.min(maxVideoEnd, end);
-        if (end - start < 5) {
-          start = Math.max(0, maxVideoEnd - targetDuration);
-          end = Math.min(maxVideoEnd, start + maxDuration);
-        }
+      if (start >= maxVideoEnd - 5) {
+        start = Math.max(0, maxVideoEnd - targetDuration);
+      }
+      end = Math.min(maxVideoEnd, end);
+      if (end - start < 5) {
+        start = Math.max(0, maxVideoEnd - targetDuration);
+        end = Math.min(maxVideoEnd, start + maxDuration);
       }
     }
 
-    return {
-      title: clip.title?.trim() || `Viral Clip #${index + 1}`,
+    // Prevent duplicate / heavily overlapping clips
+    const overlapsExisting = used.some(
+      (u) =>
+        (u.start === start && u.end === end) ||
+        overlapSeconds(u.start, u.end, start, end) > 5,
+    );
+
+    if (overlapsExisting && maxVideoEnd < Number.MAX_SAFE_INTEGER) {
+      const slot = findNonOverlappingSlot(used, Math.min(targetDuration, maxDuration), maxVideoEnd);
+      if (!slot) {
+        // Avoid emitting an identical duplicate clip if no distinct segment remains
+        continue;
+      }
+      start = slot.start;
+      end = slot.end;
+    }
+
+    used.push({ start, end });
+
+    normalized.push({
+      title: clip.title?.trim() || `Viral Clip #${normalized.length + 1}`,
       startSeconds: start,
       endSeconds: end,
       hookReason:
@@ -360,8 +421,10 @@ function normalizeClips(
           ? clip.hashtags.map((t) => (t.startsWith("#") ? t : `#${t}`))
           : ["#reels", "#viral", "#fyp", "#trending", "#instagood"],
       subtitles: [],
-    };
-  });
+    });
+  }
+
+  return normalized;
 }
 
 async function fetchInlineMediaPart(
@@ -392,7 +455,8 @@ async function fetchInlineMediaPart(
 }
 
 /**
- * Pass 1: Identifies the most viral clips, start/end timestamps, and post copy.
+ * Pass 1: Identifies distinct, non-overlapping viral clips with strong opening
+ * hooks and clean endings.
  */
 export async function analyzeViralClips(
   input: AnalyzeClipsInput,
@@ -429,7 +493,7 @@ export async function analyzeViralClips(
       apiKey,
       parts,
       mediaDeadline,
-      { temperature: 0.5, thinkingLevel: "LOW", maxOutputTokens: 2048 },
+      { temperature: 0.4, thinkingLevel: "MEDIUM", maxOutputTokens: 2048 },
       validator,
     );
   } catch (err) {
@@ -438,7 +502,7 @@ export async function analyzeViralClips(
         apiKey,
         [{ text: prompt }],
         hardDeadline,
-        { temperature: 0.7, thinkingLevel: "MINIMAL", maxOutputTokens: 2048 },
+        { temperature: 0.5, thinkingLevel: "MINIMAL", maxOutputTokens: 2048 },
         validator,
       );
     } else {
@@ -459,13 +523,14 @@ export type TranscribeResult = {
   title?: string;
   caption?: string;
   hashtags?: string[];
+  trimStartOffset?: number;
 };
 
 /**
  * Pass 2: Downloads the exact MP3 audio snippet of the clipped segment,
- * transcribes ONLY the verbatim spoken words with accurate timestamps, and
- * refines the clip title, post caption, and hashtags to match what is actually
- * spoken in this exact segment.
+ * transcribes ONLY the verbatim spoken words in crisp 1–3 word lines,
+ * refines title/caption/hashtags, and returns `trimStartOffset` if the
+ * clip opens with dead silence (> 1.5s) so the clip starts right on the hook.
  */
 export async function transcribeClipAudio(
   audioUrl: string,
@@ -488,23 +553,20 @@ export async function transcribeClipAudio(
     return { subtitles: [] };
   }
 
-  const deadline = Date.now() + 40_000;
-
   const wordsPerCue =
     captionStyle === "clean" || captionStyle === "cinema"
-      ? "3 to 6 words"
-      : "2 to 4 punchy words";
+      ? "2 to 4 words (fits on 1 short line)"
+      : "1 to 3 punchy words (fits on 1 short line)";
 
   const prompt = `Listen carefully to this ${clipDuration}-second audio clip and:
-1. Transcribe ONLY the exact spoken words verbatim into timed \`subtitles\`.
-2. Write a catchy \`title\`, \`caption\`, and \`hashtags\` based STRICTLY on what is actually spoken in THIS audio clip (do not reference unrelated topics).
+1. Transcribe ONLY the exact spoken words verbatim into short, single-line \`subtitles\`.
+2. Write a catchy \`title\`, \`caption\`, and \`hashtags\` based STRICTLY on what is actually spoken in THIS audio clip.
 
 STRICT TRANSCRIPTION RULES:
-- Transcribe word-for-word what is actually spoken. NEVER invent, guess, or paraphrase words that were not said.
-- If there is silence, music, or background noise with no speech, leave a gap — do NOT fill silent sections with made-up text.
-- Break spoken sentences into ${wordsPerCue} per subtitle cue so viewers can read effortlessly while watching.
+- Transcribe word-for-word with natural, grammatically accurate spelling (e.g., never mishear "he looks tall" as "he's looks tall"). NEVER invent or guess words that were not spoken.
+- If there is silence or no speech, leave a gap — do NOT fill silence with fake text.
+- Keep each subtitle cue very short (${wordsPerCue}) so it renders cleanly on ONE crisp line without wrapping into a giant block.
 - Set accurate \`start\` and \`end\` timestamps in seconds from \`0.0\` to \`${clipDuration.toFixed(1)}\`, aligned tightly to when each phrase is spoken.
-- Keep natural punctuation (? ! , .) for readability.
 
 Return ONLY valid JSON:
 {
@@ -512,7 +574,7 @@ Return ONLY valid JSON:
   "caption": "Scroll-stopping Instagram caption matching what is said (1-2 sentences + 1-2 emojis)",
   "hashtags": ["#reels", "#viral", "#fyp", "#trending"],
   "subtitles": [
-    { "start": 0.4, "end": 2.1, "text": "Exact spoken words" }
+    { "start": 0.4, "end": 1.6, "text": "Exact spoken words" }
   ]
 }`;
 
@@ -536,20 +598,35 @@ Return ONLY valid JSON:
       },
       { text: prompt },
     ],
-    deadline,
-    { temperature: 0.1, thinkingLevel: "LOW", maxOutputTokens: 3000 },
+    Date.now() + 40_000,
+    { temperature: 0.0, thinkingLevel: "LOW", maxOutputTokens: 3200 },
     (payload) => {
       if (Array.isArray(payload)) return true;
       return Boolean(payload && Array.isArray(payload.subtitles));
     },
   );
 
+  const rawSubs = Array.isArray(parsed) ? parsed : (parsed.subtitles ?? []);
+  let subtitles = normalizeSubtitles(rawSubs, clipDuration, captionStyle);
+
+  // Snap dead intro silence if the first spoken word starts > 1.5s in and enough clip remains.
+  let trimStartOffset = 0;
+  if (subtitles.length > 0 && subtitles[0].start > 1.5 && clipDuration - subtitles[0].start >= 14) {
+    trimStartOffset = Math.floor(subtitles[0].start - 0.3);
+    subtitles = subtitles.map((cue) => ({
+      start: Number(Math.max(0, cue.start - trimStartOffset).toFixed(2)),
+      end: Number(Math.max(0.4, cue.end - trimStartOffset).toFixed(2)),
+      text: cue.text,
+    }));
+  }
+
   if (Array.isArray(parsed)) {
-    return { subtitles: normalizeSubtitles(parsed, clipDuration, captionStyle) };
+    return { subtitles, trimStartOffset };
   }
 
   return {
-    subtitles: normalizeSubtitles(parsed.subtitles ?? [], clipDuration, captionStyle),
+    subtitles,
+    trimStartOffset,
     title: parsed.title?.trim() || undefined,
     caption: parsed.caption?.trim() || undefined,
     hashtags:

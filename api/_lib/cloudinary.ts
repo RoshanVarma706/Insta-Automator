@@ -20,6 +20,18 @@ export type SourceUploadResult = {
   duration: number;
   bytes: number;
   title?: string;
+  cached?: boolean;
+};
+
+export type StoredSourceItem = {
+  publicId: string;
+  sourceUrl: string;
+  originalUrl: string;
+  analysisUrl: string;
+  title: string;
+  duration: number;
+  bytes: number;
+  createdAt: string;
 };
 
 export type AspectMode = "9:16" | "16:9" | "9:16-16:9";
@@ -37,6 +49,7 @@ export type RenderClipOptions = {
   captionStyle?: CaptionStyle;
   hookTitle?: string;
   subtitles?: SubtitleCueInput[];
+  clipIndex?: number;
 };
 
 export type ClippedReelResult = {
@@ -120,8 +133,130 @@ export function buildClipAudioUrl(
   });
 }
 
+export function normalizeSourceUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    parsed.hash = "";
+    // Remove trailing slash on pathname unless root
+    if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
+      parsed.pathname = parsed.pathname.slice(0, -1);
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl.trim();
+  }
+}
+
+function buildContextMap(sourceUrl: string, title?: string): Record<string, string> {
+  const ctx: Record<string, string> = {
+    source_url: normalizeSourceUrl(sourceUrl),
+  };
+  if (title) {
+    // Cloudinary context values cannot contain `|` or `=`.
+    ctx.title = title.replace(/[|=]/g, " ").slice(0, 140);
+  }
+  return ctx;
+}
+
+/**
+ * Checks Cloudinary for an already-uploaded source video matching `videoUrl`
+ * so re-pasting the same link skips downloading the whole video again.
+ */
+export async function findExistingCloudinarySource(
+  videoUrl: string,
+): Promise<SourceUploadResult | null> {
+  if (!process.env.CLOUDINARY_URL) return null;
+  const normalized = normalizeSourceUrl(videoUrl);
+
+  try {
+    const res = (await cloudinary.api.resources({
+      resource_type: "video",
+      type: "upload",
+      prefix: "insta-auto/sources",
+      context: true,
+      max_results: 100,
+    })) as {
+      resources?: {
+        public_id: string;
+        secure_url: string;
+        bytes?: number;
+        duration?: number;
+        context?: { custom?: { source_url?: string; title?: string } };
+      }[];
+    };
+
+    const match = (res.resources ?? []).find(
+      (item) => item.context?.custom?.source_url === normalized,
+    );
+    if (!match) return null;
+
+    // Fetch full resource metadata to ensure accurate duration
+    const detail = (await cloudinary.api.resource(match.public_id, {
+      resource_type: "video",
+    })) as {
+      public_id: string;
+      secure_url: string;
+      duration?: number;
+      bytes?: number;
+    };
+
+    return {
+      publicId: detail.public_id,
+      originalUrl: detail.secure_url,
+      analysisUrl: buildAnalysisUrl(detail.public_id),
+      duration: Math.round(detail.duration ?? match.duration ?? 0),
+      bytes: detail.bytes ?? match.bytes ?? 0,
+      title: match.context?.custom?.title,
+      cached: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function listCloudinarySources(): Promise<StoredSourceItem[]> {
+  if (!process.env.CLOUDINARY_URL) return [];
+  try {
+    const res = (await cloudinary.api.resources({
+      resource_type: "video",
+      type: "upload",
+      prefix: "insta-auto/sources",
+      context: true,
+      max_results: 50,
+    })) as {
+      resources?: {
+        public_id: string;
+        secure_url: string;
+        bytes?: number;
+        duration?: number;
+        created_at?: string;
+        context?: { custom?: { source_url?: string; title?: string } };
+      }[];
+    };
+
+    return (res.resources ?? []).map((item) => ({
+      publicId: item.public_id,
+      sourceUrl: item.context?.custom?.source_url || item.secure_url,
+      originalUrl: item.secure_url,
+      analysisUrl: buildAnalysisUrl(item.public_id),
+      title: item.context?.custom?.title || item.public_id.split("/").pop() || "Video source",
+      duration: Math.round(item.duration ?? 0),
+      bytes: item.bytes ?? 0,
+      createdAt: item.created_at ?? new Date().toISOString(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function destroyCloudinaryVideo(publicId: string): Promise<void> {
+  if (!process.env.CLOUDINARY_URL || !publicId) return;
+  await cloudinary.uploader.destroy(publicId, { resource_type: "video" });
+}
+
 async function uploadBufferToCloudinary(
   buffer: Buffer,
+  sourceUrl: string,
   title?: string,
   estimatedDuration?: number,
 ): Promise<SourceUploadResult> {
@@ -131,6 +266,7 @@ async function uploadBufferToCloudinary(
         resource_type: "video",
         folder: "insta-auto/sources",
         format: "mp4",
+        context: buildContextMap(sourceUrl, title),
         eager: [{ format: "mp3", transformation: [ANALYSIS_TRANSFORMATION] }],
         eager_async: true,
       },
@@ -157,6 +293,7 @@ async function uploadBufferToCloudinary(
 
 async function uploadTwitchClip(
   clipSlug: string,
+  originalPageUrl: string,
 ): Promise<SourceUploadResult> {
   const gqlRes = await fetch("https://gql.twitch.tv/gql", {
     method: "POST",
@@ -204,6 +341,7 @@ async function uploadTwitchClip(
   const result = await cloudinary.uploader.upload(signedUrl, {
     resource_type: "video",
     folder: "insta-auto/sources",
+    context: buildContextMap(originalPageUrl, clip?.title),
     eager: [{ format: "mp3", transformation: [ANALYSIS_TRANSFORMATION] }],
     eager_async: true,
   });
@@ -221,6 +359,7 @@ async function uploadTwitchClip(
 async function uploadTwitchVod(
   vodId: string,
   startOffsetSeconds: number,
+  originalPageUrl: string,
 ): Promise<SourceUploadResult> {
   const gqlRes = await fetch("https://gql.twitch.tv/gql", {
     method: "POST",
@@ -387,7 +526,7 @@ async function uploadTwitchVod(
   }
 
   const combined = Buffer.concat(buffers);
-  return uploadBufferToCloudinary(combined, vodTitle, ingestedDuration);
+  return uploadBufferToCloudinary(combined, originalPageUrl, vodTitle, ingestedDuration);
 }
 
 async function uploadTwitchToCloudinary(
@@ -408,7 +547,7 @@ async function uploadTwitchToCloudinary(
         : null);
 
   if (clipSlug) {
-    return uploadTwitchClip(clipSlug);
+    return uploadTwitchClip(clipSlug, twitchUrl);
   }
 
   // 2. Twitch VOD: twitch.tv/videos/<vodId>
@@ -417,7 +556,7 @@ async function uploadTwitchToCloudinary(
 
   if (vodId) {
     const offsetSeconds = parseTwitchTimestamp(parsed.searchParams.get("t"));
-    return uploadTwitchVod(vodId, offsetSeconds);
+    return uploadTwitchVod(vodId, offsetSeconds, twitchUrl);
   }
 
   throw new Error(
@@ -469,6 +608,7 @@ async function uploadYouTubeToCloudinary(
       {
         resource_type: "video",
         folder: "insta-auto/sources",
+        context: buildContextMap(youtubeUrl, info.videoDetails.title),
         eager: [{ format: "mp3", transformation: [ANALYSIS_TRANSFORMATION] }],
         eager_async: true,
       },
@@ -528,6 +668,7 @@ export async function uploadSourceVideo(
   const result = await cloudinary.uploader.upload(targetUrl, {
     resource_type: "video",
     folder: "insta-auto/sources",
+    context: buildContextMap(videoUrl),
     eager: [{ format: "mp3", transformation: [ANALYSIS_TRANSFORMATION] }],
     eager_async: true,
   });
@@ -637,72 +778,64 @@ export async function renderClippedReel(
   let captionsBurned = false;
 
   if (opts.captionsEnabled && Array.isArray(opts.subtitles) && opts.subtitles.length > 0) {
-    // 1. Add top viral hook banner in 9:16-16:9 Shorts layout
+    const uniqueSuffix = `${Date.now().toString(36)}_${opts.clipIndex ?? 0}_${safeStart}_${safeEnd}`;
+
+    // 1. Add top viral hook text in 9:16-16:9 Shorts layout using outlined SRT (no broad box)
     if (aspectMode === "9:16-16:9" && opts.hookTitle?.trim()) {
       const cleanHook = opts.hookTitle
         .trim()
         .replace(/[^\p{L}\p{N}\s'?!.-]/gu, "")
         .toUpperCase()
-        .slice(0, 48);
+        .slice(0, 44);
 
       if (cleanHook) {
-        const hookBg =
-          captionStyle === "clean" || captionStyle === "cinema"
-            ? "#111827E6"
-            : "#E1306CE6";
+        const hookSrt = buildSrtContent([
+          { start: 0, end: Math.max(60, safeEnd - safeStart + 5), text: cleanHook },
+        ]);
+        const hookOverlay = await uploadSrtToCloudinary(hookSrt, `hook_${uniqueSuffix}`);
         pipeline.push(
           {
-            overlay: {
-              font_family: "Montserrat",
-              font_size: 44,
-              font_weight: "bold",
-              text_align: "center",
-              text: cleanHook,
-            },
+            overlay: hookOverlay,
             color: "#FFFFFF",
-            background: hookBg,
-            width: 920,
-            crop: "fit",
+            effect: "shadow:50",
+            font_family: "Montserrat",
+            font_size: 38,
+            font_weight: "bold",
           },
           { flags: "layer_apply", gravity: "north", y: 460 },
         );
       }
     }
 
-    // 2. Upload SRT and burn synced subtitles in the ideal reading position
+    // 2. Upload SRT and burn clean borderless subtitles (soft shadow, no black outline or broad box)
     const srtContent = buildSrtContent(opts.subtitles);
-    const slug = `${Date.now().toString(36)}_${safeStart}_${safeEnd}`;
-    const subtitleOverlay = await uploadSrtToCloudinary(srtContent, slug);
+    const subtitleOverlay = await uploadSrtToCloudinary(srtContent, `sub_${uniqueSuffix}`);
 
     const posY =
-      aspectMode === "16:9" ? 70 : aspectMode === "9:16-16:9" ? 470 : 360;
+      aspectMode === "16:9" ? 75 : aspectMode === "9:16-16:9" ? 480 : 360;
 
     const styleMap: Record<
       CaptionStyle,
-      { color: string; background: string; fontSize: number; fontWeight: string }
+      { color: string; fontSize: number; fontWeight: string }
     > = {
       viral: {
         color: "#FFE600",
-        background: "#000000D9",
         fontSize: aspectMode === "16:9" ? 38 : 42,
         fontWeight: "bold",
       },
       clean: {
         color: "#FFFFFF",
-        background: "#000000BF",
         fontSize: aspectMode === "16:9" ? 36 : 40,
         fontWeight: "bold",
       },
       neon: {
-        color: "#FFFFFF",
-        background: "#E1306CE6",
+        color: "#FF4D94",
         fontSize: aspectMode === "16:9" ? 38 : 42,
         fontWeight: "bold",
       },
       cinema: {
         color: "#F8FAFC",
-        background: "#00000073",
-        fontSize: aspectMode === "16:9" ? 32 : 36,
+        fontSize: aspectMode === "16:9" ? 34 : 36,
         fontWeight: "normal",
       },
     };
@@ -713,7 +846,7 @@ export async function renderClippedReel(
       {
         overlay: subtitleOverlay,
         color: chosenStyle.color,
-        background: chosenStyle.background,
+        effect: "shadow:50",
         font_family: "Montserrat",
         font_size: chosenStyle.fontSize,
         font_weight: chosenStyle.fontWeight,

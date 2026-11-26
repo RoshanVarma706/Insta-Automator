@@ -1,5 +1,5 @@
 /**
- * Supabase client — job and clip tracking.
+ * Supabase client — sources, clips, and job tracking.
  *
  * Uses the SERVICE_ROLE key so serverless functions have full
  * read/write access regardless of RLS policies.
@@ -8,6 +8,10 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 let client: SupabaseClient | null = null;
+
+export function isSupabaseConfigured(): boolean {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}
 
 export function getSupabase(): SupabaseClient {
   if (client) return client;
@@ -23,6 +27,131 @@ export function getSupabase(): SupabaseClient {
 
   client = createClient(url, key);
   return client;
+}
+
+// ─── Source cache helpers ───────────────────────────────────────────
+
+export type SourceRecord = {
+  id?: string;
+  source_url: string;
+  public_id: string;
+  original_url: string;
+  analysis_url?: string | null;
+  title?: string | null;
+  duration: number;
+  bytes: number;
+  created_at?: string;
+};
+
+export async function findSourceByUrl(
+  sourceUrl: string,
+): Promise<SourceRecord | null> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("sources")
+      .select("*")
+      .eq("source_url", sourceUrl)
+      .single();
+    if (error || !data) return null;
+    return data as SourceRecord;
+  } catch {
+    return null;
+  }
+}
+
+export async function upsertSource(record: SourceRecord): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  try {
+    const sb = getSupabase();
+    await sb
+      .from("sources")
+      .upsert(record, { onConflict: "source_url" });
+  } catch {
+    // Ignore if table doesn't exist yet
+  }
+}
+
+export async function listSupabaseSources(limit = 50): Promise<SourceRecord[]> {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("sources")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error || !data) return [];
+    return data as SourceRecord[];
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteSupabaseSource(publicId: string): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  try {
+    const sb = getSupabase();
+    await sb.from("sources").delete().eq("public_id", publicId);
+  } catch {
+    // Ignore if table doesn't exist yet
+  }
+}
+
+// ─── Clip helpers ───────────────────────────────────────────────────
+
+export type ClipRecord = {
+  id: string;
+  source_url: string;
+  public_id: string;
+  title: string;
+  clip_url: string;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+  aspect_mode: string;
+  caption_style: string;
+  caption?: string | null;
+  hashtags?: string[] | null;
+  format?: string | null;
+  created_at?: string;
+};
+
+export async function saveClipRecord(clip: ClipRecord): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  try {
+    const sb = getSupabase();
+    await sb.from("clips").upsert(clip, { onConflict: "id" });
+  } catch {
+    // Ignore if table doesn't exist yet
+  }
+}
+
+export async function listSupabaseClips(limit = 50): Promise<ClipRecord[]> {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("clips")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error || !data) return [];
+    return data as ClipRecord[];
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteSupabaseClip(id: string): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+  try {
+    const sb = getSupabase();
+    await sb.from("clips").delete().eq("id", id);
+  } catch {
+    // Ignore if table doesn't exist yet
+  }
 }
 
 // ─── Job helpers ────────────────────────────────────────────────────

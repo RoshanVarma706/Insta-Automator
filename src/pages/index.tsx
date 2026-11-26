@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
   Check,
@@ -14,6 +14,7 @@ import {
   Send,
   Sparkles,
   Subtitles,
+  Trash2,
   Tv,
   Youtube,
 } from "lucide-react";
@@ -42,6 +43,8 @@ import {
 } from "@/lib/mock";
 import {
   checkPipelineStatus,
+  deleteRecentClip,
+  fetchLibraryData,
   formatTimestamp,
   publishClipToInstagram,
   runRealPipeline,
@@ -67,8 +70,18 @@ const DURATION_OPTIONS = [
 ] as const;
 
 export default function Home() {
-  const [url, setUrl] = useState("");
-  const [source, setSource] = useState<Source>("twitch");
+  const [searchParams] = useSearchParams();
+  const initialUrl = searchParams.get("url") || "";
+  const [url, setUrl] = useState(initialUrl);
+  const [source, setSource] = useState<Source>(() =>
+    initialUrl.includes("youtube") || initialUrl.includes("youtu.be")
+      ? "youtube"
+      : initialUrl.includes("instagram")
+        ? "instagram"
+        : initialUrl && !initialUrl.includes("twitch")
+          ? "generic"
+          : "twitch",
+  );
   const [clipCount, setClipCount] = useState<number>(1);
   const [targetDuration, setTargetDuration] = useState<number>(30);
   const [aspectMode, setAspectMode] = useState<AspectMode>("9:16-16:9");
@@ -76,7 +89,10 @@ export default function Home() {
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>("viral");
   const [status, setStatus] = useState<RunStatus>("idle");
   const [activeStep, setActiveStep] = useState(-1);
+  const [usedCachedSource, setUsedCachedSource] = useState(false);
   const [results, setResults] = useState<GeneratedReel[]>([]);
+  const [recentClips, setRecentClips] = useState<GeneratedReel[]>([]);
+  const [deletingClipId, setDeletingClipId] = useState<string | null>(null);
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
     configured: true,
@@ -86,12 +102,16 @@ export default function Home() {
   const [touched, setTouched] = useState(false);
 
   const cancelled = useRef(false);
+  const runningRef = useRef(false);
   const { toast } = useToast();
 
   useEffect(() => {
     cancelled.current = false;
     checkPipelineStatus().then((next) => {
       if (!cancelled.current) setPipelineStatus(next);
+    });
+    fetchLibraryData().then((data) => {
+      if (!cancelled.current) setRecentClips(data.clips.slice(0, 6));
     });
     return () => {
       cancelled.current = true;
@@ -107,6 +127,7 @@ export default function Home() {
         : 0;
 
   async function handleGenerate() {
+    if (runningRef.current) return;
     setTouched(true);
 
     if (!urlIsValid) {
@@ -114,8 +135,10 @@ export default function Home() {
       return;
     }
 
+    runningRef.current = true;
     cancelled.current = false;
     setError("");
+    setUsedCachedSource(false);
     setResults([]);
     setStatus("running");
     setActiveStep(0);
@@ -129,8 +152,11 @@ export default function Home() {
         aspectMode,
         captionsEnabled,
         captionStyle,
-        onStep: (index) => {
-          if (!cancelled.current) setActiveStep(index);
+        onStep: (index, meta) => {
+          if (!cancelled.current) {
+            setActiveStep(index);
+            if (meta?.cached) setUsedCachedSource(true);
+          }
         },
         isCancelled: () => cancelled.current,
       });
@@ -138,11 +164,14 @@ export default function Home() {
       if (cancelled.current) return;
 
       setResults(output);
+      setRecentClips((prev) => [...output, ...prev].slice(0, 6));
       setStatus("done");
       setActiveStep(PIPELINE_STEPS.length - 1);
       toast({
         title: `${output.length} viral clip${output.length === 1 ? "" : "s"} ready!`,
-        description: "9:16 vertical clips rendered with captions & hashtags.",
+        description: output[0]?.cachedSource
+          ? "Reused downloaded video — new clips rendered without re-downloading."
+          : "Clips rendered with clean captions & hashtags.",
         variant: "success",
       });
     } catch (err) {
@@ -153,6 +182,8 @@ export default function Home() {
           ? err.message
           : "Something interrupted the pipeline. Try again.";
       setError(message);
+    } finally {
+      runningRef.current = false;
     }
   }
 
@@ -187,10 +218,33 @@ export default function Home() {
     cancelled.current = false;
     setStatus("idle");
     setActiveStep(-1);
+    setUsedCachedSource(false);
+    setResultState();
+  }
+
+  function setResultState() {
     setResults([]);
     setError("");
     setUrl("");
     setTouched(false);
+  }
+
+  async function handleDeleteClip(id: string) {
+    setDeletingClipId(id);
+    try {
+      await deleteRecentClip(id);
+      setResults((prev) => prev.filter((c) => c.id !== id));
+      setRecentClips((prev) => prev.filter((c) => c.id !== id));
+      toast({ title: "Clip deleted", variant: "success" });
+    } catch (err) {
+      toast({
+        title: "Failed to delete clip",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setDeletingClipId(null);
+    }
   }
 
   async function copy(value: string, label: string) {
@@ -558,7 +612,14 @@ export default function Home() {
 
             {status !== "idle" ? (
               <div className="space-y-4 rounded-2xl border border-insta-border bg-insta-bg/50 p-4">
-                <Progress value={progress} label="Clipping progress" />
+                <div className="flex items-center justify-between gap-2">
+                  <Progress value={progress} label="Clipping progress" className="flex-1" />
+                  {usedCachedSource ? (
+                    <span className="shrink-0 rounded-full bg-insta-success/10 px-2.5 py-0.5 text-[11px] font-semibold text-insta-success">
+                      Reused downloaded video
+                    </span>
+                  ) : null}
+                </div>
 
                 <ol className="space-y-3">
                   {PIPELINE_STEPS.map((step, index) => {
@@ -620,6 +681,20 @@ export default function Home() {
                       <Check className="h-3.5 w-3.5" />
                       {reel.mediaId ? "Published" : "Clip ready"}
                     </span>
+                    <button
+                      type="button"
+                      disabled={deletingClipId === reel.id}
+                      onClick={() => handleDeleteClip(reel.id)}
+                      className="rounded-lg p-1.5 text-insta-muted transition hover:bg-insta-danger/10 hover:text-insta-danger disabled:opacity-50"
+                      aria-label={`Delete ${reel.title}`}
+                      title="Delete clip"
+                    >
+                      {deletingClipId === reel.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                    </button>
                   </div>
                   <CardDescription>
                     {formatTimestamp(reel.startSeconds)} – {formatTimestamp(reel.endSeconds)} (
@@ -776,17 +851,64 @@ export default function Home() {
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Already have reels?</CardTitle>
-              <CardDescription>See every job and its status.</CardDescription>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-base">Recent clips</CardTitle>
+                <Link
+                  to="/dashboard"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-insta-primary hover:underline"
+                >
+                  Dashboard
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+              <CardDescription>
+                {recentClips.length > 0
+                  ? "Delete old clips or reuse cached videos from Dashboard."
+                  : "See every downloaded source and generated clip."}
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              <Link
-                to="/dashboard"
-                className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-insta-border px-5 text-sm font-semibold text-insta-text transition hover:bg-white"
-              >
-                Open dashboard
-                <ArrowRight className="h-4 w-4" />
-              </Link>
+            <CardContent className="space-y-2">
+              {recentClips.length > 0 ? (
+                recentClips.map((clip) => (
+                  <div
+                    key={clip.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-insta-border px-3 py-2 text-xs"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-semibold text-insta-text">{clip.title}</p>
+                      <p className="text-[11px] text-insta-muted">
+                        {formatTimestamp(clip.startSeconds)} – {formatTimestamp(clip.endSeconds)} (
+                        {clip.durationSeconds}s)
+                      </p>
+                    </div>
+                    <a
+                      href={clip.videoUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 font-semibold text-insta-primary hover:underline"
+                    >
+                      Watch
+                    </a>
+                    <button
+                      type="button"
+                      disabled={deletingClipId === clip.id}
+                      onClick={() => handleDeleteClip(clip.id)}
+                      className="rounded-lg p-1 text-insta-muted transition hover:bg-insta-danger/10 hover:text-insta-danger disabled:opacity-50"
+                      aria-label={`Delete recent clip ${clip.title}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <Link
+                  to="/dashboard"
+                  className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-insta-border px-5 text-sm font-semibold text-insta-text transition hover:bg-white"
+                >
+                  Open dashboard
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              )}
             </CardContent>
           </Card>
         </div>

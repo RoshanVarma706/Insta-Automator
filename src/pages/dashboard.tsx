@@ -1,15 +1,15 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowUpRight,
-  CheckCircle2,
   Clock3,
+  Database,
   Film,
-  Instagram,
-  Link2,
+  HardDrive,
+  Loader2,
   Plus,
-  TrendingUp,
-  Tv,
-  Youtube,
+  Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   Card,
@@ -23,156 +23,112 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  useToast,
 } from "@/components/ui";
-import type { Source } from "@/lib/mock";
-import { cn } from "@/lib/utils";
+import {
+  deleteDownloadedSource,
+  deleteRecentClip,
+  fetchLibraryData,
+  formatTimestamp,
+  type GeneratedReel,
+  type StoredSource,
+} from "@/lib/pipeline";
 
-type SourceStatus = "completed" | "processing" | "queued";
-
-type SourceRow = {
-  id: string;
-  title: string;
-  host: string;
-  type: Source;
-  status: SourceStatus;
-  clips: number;
-};
-
-type ClipRow = {
-  id: string;
-  title: string;
-  source: string;
-  format: string;
-  status: "published" | "rendered" | "scheduled";
-  createdAt: string;
-};
-
-const SOURCES: SourceRow[] = [
-  {
-    id: "src_1",
-    title: "Street food in 60 seconds",
-    host: "youtube.com",
-    type: "youtube",
-    status: "completed",
-    clips: 4,
-  },
-  {
-    id: "src_2",
-    title: "Studio dance trend",
-    host: "instagram.com",
-    type: "instagram",
-    status: "processing",
-    clips: 2,
-  },
-  {
-    id: "src_3",
-    title: "Product teaser cut",
-    host: "cdn.example.com",
-    type: "generic",
-    status: "completed",
-    clips: 3,
-  },
-  {
-    id: "src_4",
-    title: "Weekly vlog highlights",
-    host: "youtube.com",
-    type: "youtube",
-    status: "queued",
-    clips: 0,
-  },
-];
-
-const CLIPS: ClipRow[] = [
-  {
-    id: "clip_1",
-    title: "Hook: 3 dishes you can't miss",
-    source: "Street food in 60 seconds",
-    format: "1080 × 1920",
-    status: "published",
-    createdAt: "Today, 14:32",
-  },
-  {
-    id: "clip_2",
-    title: "Dance break — alt take",
-    source: "Studio dance trend",
-    format: "1080 × 1920",
-    status: "rendered",
-    createdAt: "Today, 13:58",
-  },
-  {
-    id: "clip_3",
-    title: "Teaser — 15s cut",
-    source: "Product teaser cut",
-    format: "1080 × 1920",
-    status: "published",
-    createdAt: "Yesterday, 18:11",
-  },
-  {
-    id: "clip_4",
-    title: "Vlog cold open",
-    source: "Weekly vlog highlights",
-    format: "1080 × 1920",
-    status: "scheduled",
-    createdAt: "Yesterday, 09:24",
-  },
-];
-
-const sourceIcons: Record<Source, typeof Youtube> = {
-  twitch: Tv,
-  youtube: Youtube,
-  instagram: Instagram,
-  generic: Link2,
-};
-
-const sourceTone: Record<Source, string> = {
-  twitch: "bg-insta-accent/10 text-insta-accent",
-  youtube: "bg-insta-secondary/10 text-insta-secondary",
-  instagram: "bg-insta-primary/10 text-insta-primary",
-  generic: "bg-insta-accent/10 text-insta-accent",
-};
-
-const statusTone: Record<SourceStatus, string> = {
-  completed: "bg-insta-success/10 text-insta-success",
-  processing: "bg-insta-warning/10 text-insta-warning",
-  queued: "bg-insta-muted/10 text-insta-muted",
-};
-
-const clipTone: Record<ClipRow["status"], string> = {
-  published: "bg-insta-success/10 text-insta-success",
-  rendered: "bg-insta-accent/10 text-insta-accent",
-  scheduled: "bg-insta-warning/10 text-insta-warning",
-};
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "—";
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 export default function Dashboard() {
-  const totalClips = SOURCES.reduce((sum, source) => sum + source.clips, 0);
-  const published = CLIPS.filter((clip) => clip.status === "published").length;
+  const [clips, setClips] = useState<GeneratedReel[]>([]);
+  const [sources, setSources] = useState<StoredSource[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    let active = true;
+    fetchLibraryData()
+      .then((data) => {
+        if (!active) return;
+        setClips(data.clips);
+        setSources(data.sources);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleDeleteClip(id: string) {
+    setBusyId(id);
+    try {
+      await deleteRecentClip(id);
+      setClips((prev) => prev.filter((c) => c.id !== id));
+      toast({ title: "Clip removed", variant: "success" });
+    } catch (err) {
+      toast({
+        title: "Could not delete clip",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDeleteSource(publicId: string) {
+    setBusyId(publicId);
+    try {
+      await deleteDownloadedSource(publicId);
+      setSources((prev) => prev.filter((s) => s.publicId !== publicId));
+      setClips((prev) => prev.filter((c) => c.publicId !== publicId));
+      toast({
+        title: "Downloaded source deleted",
+        description: "Removed from Cloudinary cache & library.",
+        variant: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Could not delete source",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const totalStorage = sources.reduce((sum, s) => sum + (s.bytes || 0), 0);
 
   const stats = [
     {
-      label: "Active sources",
-      value: String(SOURCES.length),
-      hint: "2 platforms connected",
-      icon: Film,
+      label: "Downloaded sources",
+      value: String(sources.length),
+      hint: "Cached for instant reuse",
+      icon: Database,
       tone: "text-insta-primary bg-insta-primary/10",
     },
     {
-      label: "Clips generated",
-      value: String(totalClips),
-      hint: "Across all sources",
-      icon: TrendingUp,
+      label: "Recent clips",
+      value: String(clips.length),
+      hint: "Ready to download or post",
+      icon: Film,
       tone: "text-insta-accent bg-insta-accent/10",
     },
     {
-      label: "Published",
-      value: String(published),
-      hint: "Live on Instagram",
-      icon: CheckCircle2,
+      label: "Cache size",
+      value: formatBytes(totalStorage),
+      hint: "Stored in Cloudinary",
+      icon: HardDrive,
       tone: "text-insta-success bg-insta-success/10",
     },
     {
-      label: "Avg. approval",
-      value: "92%",
-      hint: "Last 30 days",
+      label: "Link matching",
+      value: "Active",
+      hint: "Same link skips download",
       icon: Clock3,
       tone: "text-insta-warning bg-insta-warning/10",
     },
@@ -184,7 +140,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">Dashboard</h1>
           <p className="mt-1 text-sm text-insta-muted">
-            A quick read on your sources, renders and published reels.
+            Manage cached source videos and recent rendered clips.
           </p>
         </div>
 
@@ -193,7 +149,7 @@ export default function Dashboard() {
           className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[linear-gradient(135deg,#e1306c,#fd1f1f_55%,#a855f7)] px-5 text-sm font-semibold text-white shadow-sm transition hover:opacity-95"
         >
           <Plus className="h-4 w-4" />
-          New reel
+          New clip
         </Link>
       </div>
 
@@ -211,7 +167,7 @@ export default function Dashboard() {
                   <p className="mt-2 text-2xl font-extrabold tracking-tight">{stat.value}</p>
                   <p className="mt-0.5 text-xs text-insta-muted">{stat.hint}</p>
                 </div>
-                <span className={cn("flex h-9 w-9 items-center justify-center rounded-xl", stat.tone)}>
+                <span className={`flex h-9 w-9 items-center justify-center rounded-xl ${stat.tone}`}>
                   <Icon className="h-4.5 w-4.5" />
                 </span>
               </CardContent>
@@ -220,100 +176,133 @@ export default function Dashboard() {
         })}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]">
         <Card>
           <CardHeader>
-            <CardTitle>Sources</CardTitle>
-            <CardDescription>Videos currently feeding the pipeline.</CardDescription>
+            <CardTitle>Downloaded sources</CardTitle>
+            <CardDescription>
+              Re-pasting any of these links skips downloading and clips instantly.
+            </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {SOURCES.map((source) => {
-              const Icon = sourceIcons[source.type];
-
-              return (
+          <CardContent className="space-y-2.5">
+            {loading ? (
+              <div className="flex items-center justify-center py-10 text-sm text-insta-muted">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading cached sources…
+              </div>
+            ) : sources.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-insta-border py-10 text-center text-xs text-insta-muted">
+                No downloaded sources yet. Generate a clip to cache its source video.
+              </div>
+            ) : (
+              sources.map((src) => (
                 <div
-                  key={source.id}
+                  key={src.publicId}
                   className="flex items-center gap-3 rounded-xl border border-insta-border px-3 py-2.5"
                 >
-                  <span
-                    className={cn(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
-                      sourceTone[source.type],
-                    )}
-                  >
-                    <Icon className="h-4 w-4" />
-                  </span>
-
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-semibold text-insta-text">{source.title}</p>
+                    <p className="truncate text-sm font-semibold text-insta-text">{src.title}</p>
                     <p className="truncate text-xs text-insta-muted">
-                      {source.host} · {source.clips} clip{source.clips === 1 ? "" : "s"}
+                      {src.duration ? `${src.duration}s · ` : ""}
+                      {formatBytes(src.bytes)} · {src.sourceUrl}
                     </p>
                   </div>
 
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize",
-                      statusTone[source.status],
-                    )}
+                  <Link
+                    to={`/?url=${encodeURIComponent(src.sourceUrl)}`}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-insta-primary/10 px-2.5 py-1.5 text-xs font-semibold text-insta-primary transition hover:bg-insta-primary/15"
                   >
-                    {source.status}
-                  </span>
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Reuse
+                  </Link>
+
+                  <button
+                    type="button"
+                    disabled={busyId === src.publicId}
+                    onClick={() => handleDeleteSource(src.publicId)}
+                    className="rounded-lg p-1.5 text-insta-muted transition hover:bg-insta-danger/10 hover:text-insta-danger disabled:opacity-50"
+                    aria-label={`Delete source ${src.title}`}
+                    title="Delete downloaded source from Cloudinary"
+                  >
+                    {busyId === src.publicId ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
-              );
-            })}
+              ))
+            )}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Recent clips</CardTitle>
-            <CardDescription>Newest renders from the pipeline.</CardDescription>
+            <CardDescription>Watch, download, or delete rendered clips.</CardDescription>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>Clip</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {CLIPS.map((clip) => (
-                  <TableRow key={clip.id}>
-                    <TableCell>
-                      <p className="font-semibold text-insta-text">{clip.title}</p>
-                      <p className="text-xs text-insta-muted">
-                        {clip.source} · {clip.format}
-                      </p>
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className={cn(
-                          "rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize",
-                          clipTone[clip.status],
-                        )}
-                      >
-                        {clip.status}
-                      </span>
-                      <p className="mt-1 text-[11px] text-insta-muted">{clip.createdAt}</p>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <a
-                        href="https://www.instagram.com"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-insta-primary hover:underline"
-                      >
-                        View
-                        <ArrowUpRight className="h-3.5 w-3.5" />
-                      </a>
-                    </TableCell>
+            {loading ? (
+              <div className="flex items-center justify-center py-10 text-sm text-insta-muted">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Loading recent clips…
+              </div>
+            ) : clips.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-insta-border py-10 text-center text-xs text-insta-muted">
+                No clips generated yet. Create your first clip from the Create page.
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead>Clip</TableHead>
+                    <TableHead>Range</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {clips.map((clip) => (
+                    <TableRow key={clip.id}>
+                      <TableCell>
+                        <p className="font-semibold text-insta-text">{clip.title}</p>
+                        <p className="text-xs text-insta-muted">{clip.format}</p>
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-xs text-insta-muted">
+                        {formatTimestamp(clip.startSeconds)} – {formatTimestamp(clip.endSeconds)} (
+                        {clip.durationSeconds}s)
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="inline-flex items-center gap-2">
+                          <a
+                            href={clip.videoUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-insta-primary hover:underline"
+                          >
+                            Open
+                            <ArrowUpRight className="h-3.5 w-3.5" />
+                          </a>
+                          <button
+                            type="button"
+                            disabled={busyId === clip.id}
+                            onClick={() => handleDeleteClip(clip.id)}
+                            className="rounded-lg p-1.5 text-insta-muted transition hover:bg-insta-danger/10 hover:text-insta-danger disabled:opacity-50"
+                            aria-label={`Delete ${clip.title}`}
+                            title="Delete clip"
+                          >
+                            {busyId === clip.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
       </div>
